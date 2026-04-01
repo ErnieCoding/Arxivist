@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>arXiv Paper Search</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f1117;
+            color: #e0e0e0;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 960px;
+            margin: 0 auto;
+            padding: 2rem 1.5rem;
+        }
+
+        h1 {
+            font-size: 1.8rem;
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+            color: #fff;
+        }
+
+        .subtitle {
+            color: #888;
+            font-size: 0.95rem;
+            margin-bottom: 2rem;
+        }
+
+        /* Search form */
+        .search-section {
+            background: #1a1d27;
+            border: 1px solid #2a2d3a;
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .search-row {
+            display: flex;
+            gap: 0.75rem;
+            align-items: flex-end;
+        }
+
+        .input-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+        }
+
+        .input-group.query { flex: 1; }
+        .input-group.authors { flex: 0.6; }
+        .input-group.max-results { width: 120px; }
+
+        label {
+            font-size: 0.8rem;
+            color: #999;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        input[type="text"], input[type="number"] {
+            background: #12141c;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 0.7rem 1rem;
+            color: #fff;
+            font-size: 0.95rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        input:focus { border-color: #5b6ef5; }
+
+        button {
+            background: #5b6ef5;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            padding: 0.7rem 1.5rem;
+            font-size: 0.95rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.2s;
+            white-space: nowrap;
+        }
+
+        button:hover { background: #4a5ce0; }
+        button:disabled { background: #333; cursor: not-allowed; }
+
+        /* Status / loading */
+        .status {
+            margin-top: 1rem;
+            font-size: 0.9rem;
+            color: #888;
+            display: none;
+        }
+
+        .status.visible { display: flex; align-items: center; gap: 0.5rem; }
+
+        .status-text { line-height: 1.4; }
+
+        .search-terms {
+            display: block;
+            margin-top: 0.3rem;
+            color: #8b9cf7;
+            font-family: monospace;
+            font-size: 0.85rem;
+        }
+
+        .spinner {
+            width: 16px;
+            height: 16px;
+            border: 2px solid #333;
+            border-top-color: #5b6ef5;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            flex-shrink: 0;
+            align-self: flex-start;
+            margin-top: 2px;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Results */
+        .results-section {
+            background: #1a1d27;
+            border: 1px solid #2a2d3a;
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            display: none;
+        }
+
+        .results-section.visible { display: block; }
+
+        .results-header {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 1rem;
+        }
+
+        .results-header h2 {
+            font-size: 1.1rem;
+            color: #fff;
+        }
+
+        .meta-badges {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+
+        .badge {
+            font-size: 0.75rem;
+            padding: 0.15rem 0.6rem;
+            border-radius: 10px;
+            display: none;
+        }
+
+        .badge.visible { display: inline-block; }
+        .badge.time { background: #1a3a1a; color: #6b7; }
+        .badge.query { background: #1a1a3a; color: #8b9cf7; font-family: monospace; }
+
+        /* Markdown-rendered results */
+        .results-content {
+            font-size: 0.9rem;
+            line-height: 1.7;
+            color: #ccc;
+            max-height: 700px;
+            overflow-y: auto;
+            padding-right: 0.5rem;
+        }
+
+        .results-content h3 {
+            color: #fff;
+            font-size: 1rem;
+            margin-top: 1.2rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .results-content h3:first-child { margin-top: 0; }
+
+        .results-content strong { color: #ddd; }
+
+        .results-content p { margin-bottom: 0.4rem; }
+
+        .results-content hr {
+            border: none;
+            border-top: 1px solid #2a2d3a;
+            margin: 1rem 0;
+        }
+
+        .error-text { color: #f55b5b; }
+
+        /* Files panel */
+        .files-section {
+            background: #1a1d27;
+            border: 1px solid #2a2d3a;
+            border-radius: 12px;
+            padding: 1.5rem;
+            display: none;
+        }
+
+        .files-section.visible { display: block; }
+
+        .files-section h2 {
+            font-size: 1.1rem;
+            margin-bottom: 1rem;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .file-count {
+            background: #5b6ef5;
+            color: #fff;
+            font-size: 0.75rem;
+            padding: 0.15rem 0.5rem;
+            border-radius: 10px;
+        }
+
+        .files-list {
+            list-style: none;
+        }
+
+        .files-list li {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.5rem 0.75rem;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            transition: background 0.15s;
+        }
+
+        .files-list li:hover { background: #22253a; }
+
+        .file-name { color: #8b9cf7; }
+        .file-size { color: #666; font-size: 0.85rem; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>arXiv Paper Search</h1>
+        <p class="subtitle">Search, download, and summarize scientific papers using an AI agent</p>
+
+        <!-- Search -->
+        <div class="search-section">
+            <div class="search-row">
+                <div class="input-group query">
+                    <label for="query">Search Query</label>
+                    <input type="text" id="query"
+                           placeholder="e.g. transformer architectures for computer vision"
+                           autocomplete="off">
+                </div>
+                <div class="input-group authors">
+                    <label for="authors">Authors (optional)</label>
+                    <input type="text" id="authors"
+                           placeholder="e.g. LeCun, Hinton, Bengio"
+                           autocomplete="off">
+                </div>
+                <div class="input-group max-results">
+                    <label for="maxResults">Max Results</label>
+                    <input type="number" id="maxResults" value="10" min="1" max="50">
+                </div>
+                <button id="searchBtn" onclick="doSearch()">Search</button>
+            </div>
+            <div class="status" id="status">
+                <div class="spinner"></div>
+                <div class="status-text">
+                    <span>Agent is searching arXiv and downloading papers...</span>
+                    <span class="search-terms" id="statusTerms"></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Results -->
+        <div class="results-section" id="resultsSection">
+            <div class="results-header">
+                <h2>Agent Results</h2>
+                <div class="meta-badges">
+                    <span class="badge query" id="badgeQuery"></span>
+                    <span class="badge time" id="badgeTime"></span>
+                </div>
+            </div>
+            <div class="results-content" id="resultsContent"></div>
+        </div>
+
+        <!-- Files from this query -->
+        <div class="files-section" id="queryFilesSection">
+            <h2>
+                Downloaded Papers
+                <span class="file-count" id="queryFileCount">0</span>
+            </h2>
+            <ul class="files-list" id="queryFilesList"></ul>
+        </div>
+    </div>
+
+    <script>
+        // Build a preview of what the arXiv query will look like from the input
+        function previewSearchTerms(queryText, authorsText) {
+            const stopWords = new Set([
+                'a','an','the','and','or','but','in','on','at','to','for','of',
+                'with','by','from','is','are','was','were','be','been','being',
+                'have','has','had','do','does','did','will','would','could',
+                'should','may','might','can','about','into','through','during',
+                'before','after','above','below','between','under','over','then',
+                'than','that','this','these','those','such','very','not','no',
+                'nor','so','if','when','how','what','which','who','whom','where',
+                'why','all','each','every','both','few','more','most','other',
+                'some','any','only','using'
+            ]);
+
+            const terms = queryText.trim().split(/\s+/)
+                .filter(t => !stopWords.has(t.toLowerCase()))
+                .map(t => t.includes(':') ? t : `all:${t}`);
+
+            if (authorsText.trim()) {
+                const authors = authorsText.split(',').map(a => a.trim()).filter(Boolean);
+                authors.forEach(a => terms.push(`au:${a}`));
+            }
+
+            return terms.join(' AND ');
+        }
+
+        async function doSearch() {
+            const queryVal = document.getElementById('query').value.trim();
+            const authors = document.getElementById('authors').value.trim();
+            const maxResults = parseInt(document.getElementById('maxResults').value) || 10;
+            const btn = document.getElementById('searchBtn');
+            const status = document.getElementById('status');
+            const statusTerms = document.getElementById('statusTerms');
+            const resultsSection = document.getElementById('resultsSection');
+            const resultsContent = document.getElementById('resultsContent');
+            const badgeTime = document.getElementById('badgeTime');
+            const badgeQuery = document.getElementById('badgeQuery');
+            const filesSection = document.getElementById('queryFilesSection');
+
+            if (!queryVal) {
+                alert('Please enter a search query.');
+                return;
+            }
+
+            // Show loading state immediately WITH the predicted search terms
+            btn.disabled = true;
+            const preview = previewSearchTerms(queryVal, authors);
+            statusTerms.textContent = preview;
+            status.classList.add('visible');
+            resultsSection.classList.remove('visible');
+            filesSection.classList.remove('visible');
+            badgeTime.classList.remove('visible');
+            badgeQuery.classList.remove('visible');
+
+            try {
+                const resp = await fetch('/search', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query: queryVal, authors, max_results: maxResults }),
+                });
+
+                const data = await resp.json();
+
+                resultsSection.classList.add('visible');
+
+                if (data.error) {
+                    // Hard error (e.g. empty query) — no markdown
+                    resultsContent.innerHTML = `<span class="error-text">${data.error}</span>`;
+                } else if (data.result) {
+                    // Render markdown — works for both success summaries
+                    // and formatted error reports (rate limit, timeout, etc.)
+                    resultsContent.innerHTML = marked.parse(data.result);
+
+                    // Show files only if there are any
+                    if (data.files && data.files.length > 0) {
+                        updateQueryFiles(data.files);
+                    }
+
+                    // Show badges
+                    if (data.search_query) {
+                        badgeQuery.textContent = data.search_query;
+                        badgeQuery.classList.add('visible');
+                    }
+                    if (data.elapsed_seconds != null) {
+                        badgeTime.textContent = `${data.elapsed_seconds}s`;
+                        badgeTime.classList.add('visible');
+                    }
+                } else {
+                    resultsContent.innerHTML = '<span class="error-text">No response received from the server.</span>';
+                }
+            } catch (err) {
+                resultsSection.classList.add('visible');
+                resultsContent.innerHTML = `<span class="error-text">Network error: ${err.message}</span>`;
+            } finally {
+                btn.disabled = false;
+                status.classList.remove('visible');
+            }
+        }
+
+        function updateQueryFiles(files) {
+            const section = document.getElementById('queryFilesSection');
+            const list = document.getElementById('queryFilesList');
+            const count = document.getElementById('queryFileCount');
+
+            if (!files || files.length === 0) {
+                section.classList.remove('visible');
+                return;
+            }
+
+            section.classList.add('visible');
+            count.textContent = files.length;
+            list.innerHTML = files.map(f =>
+                `<li>
+                    <span class="file-name">${f.name}</span>
+                    <span class="file-size">${f.size_kb} KB</span>
+                </li>`
+            ).join('');
+        }
+
+        // Allow Enter key to trigger search
+        document.getElementById('query').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') doSearch();
+        });
+    </script>
+</body>
+</html>
