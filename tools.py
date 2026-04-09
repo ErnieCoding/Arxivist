@@ -1,12 +1,3 @@
-"""
-Custom agent tools for arXiv search and paper download.
-Wrapped as an MCP server via the Claude Agent SDK.
-
-Session tracking: each query gets a session dict that accumulates
-papers found and downloaded, so the caller can reliably build
-summaries after the agent loop finishes.
-"""
-
 import logging
 import os
 import re
@@ -24,8 +15,7 @@ os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
 ARXIV_API_URL = "https://export.arxiv.org/api/query"
 
-# English stop words to strip from search queries — these add noise
-# and waste arXiv API query slots without improving relevance.
+# English stop words to strip from search queries
 _STOP_WORDS = frozenset({
     "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
     "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
@@ -124,12 +114,7 @@ def _parse_arxiv_response(xml_text: str) -> list[dict]:
 
 
 def _fetch_arxiv(url: str, max_retries: int = 4) -> str:
-    """Fetch from arXiv API with retry + exponential backoff.
-
-    Catches all failure modes: HTTP 429/5xx, connection errors, read timeouts.
-    socket.timeout / TimeoutError are NOT subclasses of URLError on all
-    platforms, so they must be caught separately.
-    """
+    """Fetch from arXiv API with retry + exponential backoff."""
     last_err = None
     for attempt in range(max_retries):
         if attempt > 0:
@@ -221,7 +206,6 @@ async def search_arxiv(args: dict) -> dict:
     try:
         xml_text = _fetch_arxiv(url)
     except RuntimeError as e:
-        # Error already recorded in session by _fetch_arxiv
         return {
             "content": [{"type": "text", "text": f"Search failed: {e}"}]
         }
