@@ -51,7 +51,7 @@ log = logging.getLogger(__name__)
 
 # When deployed behind nginx at a sub-path (e.g. /arxivist), set SCRIPT_NAME
 # in the container environment so the template generates correct fetch URLs.
-SCRIPT_NAME = os.environ.get("SCRIPT_NAME", "").rstrip("/")
+SCRIPT_NAME = os.environ.get("APP_BASE", "").rstrip("/")
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 os.makedirs(os.path.join(PROJECT_DIR, ".claude", "skills"), exist_ok=True)

@@ -16,7 +16,7 @@ services:
 
     environment:
       # Tells Flask/index.html the sub-path prefix nginx strips before forwarding.
-      - SCRIPT_NAME=/arxivist
+      - APP_BASE=/arxivist
 
     volumes:
       # Downloaded PDFs — persist across restarts and image upgrades.
