@@ -1,0 +1,37 @@
+services:
+  arxivist:
+    build: .
+    container_name: arxivist
+    restart: unless-stopped
+
+    # Bind ONLY to localhost so the port is not exposed to the internet.
+    # nginx on the host proxies /arxivist/ → 127.0.0.1:5050.
+    ports:
+      - "127.0.0.1:5050:5050"
+
+    # .env in the project root supplies ANTHROPIC_API_KEY and any other secrets.
+    # Docker reads this file and injects the values as environment variables.
+    env_file:
+      - .env
+
+    environment:
+      # Tells Flask/index.html the sub-path prefix nginx strips before forwarding.
+      - SCRIPT_NAME=/arxivist
+
+    volumes:
+      # Downloaded PDFs — persist across restarts and image upgrades.
+      - arxivist_downloads:/app/downloads
+      # Agent-created skill files — persist across restarts and image upgrades.
+      # On first run Docker seeds this volume from the image's .claude/skills/ contents,
+      # so all built-in skills (searching-arxiv, summarizing-papers, etc.) are available.
+      - arxivist_skills:/app/.claude/skills
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  arxivist_downloads:
+  arxivist_skills:

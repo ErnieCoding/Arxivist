@@ -33,14 +33,28 @@ load_dotenv()
 from claude_agent_sdk import query, ClaudeAgentOptions
 from tools import arxiv_server, DOWNLOADS_DIR, reset_session, get_session
 
+import sys as _sys
+_sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools"))
+from call_api import api_server
+
 app = Flask(__name__)
+
+# Trust the nginx reverse proxy for correct client IP, protocol, and host headers.
+from werkzeug.middleware.proxy_fix import ProxyFix
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 log = logging.getLogger(__name__)
 
+# When deployed behind nginx at a sub-path (e.g. /arxivist), set SCRIPT_NAME
+# in the container environment so the template generates correct fetch URLs.
+SCRIPT_NAME = os.environ.get("SCRIPT_NAME", "").rstrip("/")
+
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+os.makedirs(os.path.join(PROJECT_DIR, ".claude", "skills"), exist_ok=True)
 
 
 def _format_error_report(session: dict) -> str:
@@ -167,7 +181,7 @@ async def run_agent(user_query: str, max_results: int, authors: str) -> None:
 
     options = ClaudeAgentOptions(
         cwd=PROJECT_DIR,
-        setting_sources=["project"],
+        setting_sources=["user", "project"],
         mcp_servers={"arxiv": arxiv_server},
         allowed_tools=[
             "Skill",
@@ -195,7 +209,7 @@ async def run_agent(user_query: str, max_results: int, authors: str) -> None:
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", base=SCRIPT_NAME)
 
 
 @app.route("/search", methods=["POST"])
@@ -273,6 +287,171 @@ def search():
             "search_query": session.get("search_query", ""),
             "elapsed_seconds": round(elapsed, 2),
         })
+
+
+def build_chat_prompt(history: list, new_message: str) -> str:
+    """Build the per-request prompt for /chat, including conversation history."""
+    lines = []
+    if history:
+        lines.append("Conversation history:")
+        for turn in history:
+            role = "User" if turn.get("role") == "user" else "Assistant"
+            lines.append(f"{role}: {turn.get('content', '')}")
+        lines.append("")
+    lines.append(f"User: {new_message}")
+    lines.append("")
+    lines.append(
+        "Complete the user's full request end-to-end. "
+        "If this involves finding or downloading papers, use the searching-arxiv skill. "
+        "If this involves a database or external API, check .claude/skills/ for a matching skill, "
+        "or use the creating-skills skill to create one first. "
+        "If papers were downloaded and the user wants summaries, use the summarizing-papers skill. "
+        "Do not stop halfway — complete all steps before responding."
+    )
+    return "\n".join(lines)
+
+
+async def run_chat_agent(prompt: str) -> str:
+    """
+    Run the agent for a /chat request with both arxiv and api MCP servers,
+    all skills enabled, and Write/Bash/Read built-ins for skill creation.
+    Returns the final text output accumulated from the agent loop.
+    """
+    system_prompt = (
+        "You are Arxivist, an intelligent research assistant with self-extending capabilities.\n\n"
+        "Before responding to any request, identify which skill applies by checking the description "
+        "of available skills. Skills are in .claude/skills/ and are loaded automatically.\n\n"
+        "Available skills:\n"
+        "- searching-arxiv: find and download papers from arXiv\n"
+        "- summarizing-papers: summarize downloaded papers\n"
+        "- creating-skills: create new SKILL.md files for databases or APIs the user mentions\n"
+        "- plus any database/API skills previously created in .claude/skills/\n\n"
+        "When a user asks to store, add, index, or retrieve data from a database or external system:\n"
+        "  1. Run: ls .claude/skills/ to check for a matching skill.\n"
+        "  2. If found, read its SKILL.md and follow its workflow using api:call_api.\n"
+        "  3. If not found, use the creating-skills skill to create a SKILL.md for it, "
+        "then immediately use the new skill to complete the request.\n\n"
+        "When a user provides API details (base URL, endpoints, auth tokens), treat this as a "
+        "request to create or update a skill for that system — do it proactively.\n\n"
+        "Always complete the user's full request. If the request involves both finding papers AND "
+        "ingesting them into a database, do both steps without waiting for a second message."
+    )
+
+    options = ClaudeAgentOptions(
+        cwd=PROJECT_DIR,
+        setting_sources=["user", "project"],
+        mcp_servers={"arxiv": arxiv_server, "api": api_server},
+        allowed_tools=[
+            "Skill",
+            "Read",
+            "Write",
+            "Bash",
+            "mcp__arxiv__search_arxiv",
+            "mcp__arxiv__download_paper",
+            "mcp__arxiv__list_downloads",
+            "mcp__api__call_api",
+        ],
+        max_turns=40,
+        system_prompt=system_prompt,
+    )
+
+    collected_text = []
+    turn = 0
+    async for message in query(prompt=prompt, options=options):
+        turn += 1
+        mtype = type(message).__name__
+        if hasattr(message, "content") and isinstance(message.content, list):
+            for block in message.content:
+                if hasattr(block, "name"):
+                    log.info("Chat agent turn %d: called tool %s", turn, block.name)
+                elif hasattr(block, "text") and block.text:
+                    collected_text.append(block.text)
+                    snippet = block.text[:120].encode("ascii", "replace").decode()
+                    log.info("Chat agent turn %d: text — %s", turn, snippet)
+        else:
+            log.info("Chat agent turn %d: %s", turn, mtype)
+
+    return "\n\n".join(t for t in collected_text if t.strip())
+
+
+@app.route("/chat", methods=["POST"])
+def chat():
+    data = request.get_json()
+    message = (data.get("message") or "").strip()
+    history = data.get("history") or []
+
+    if not message:
+        return jsonify({"error": "Please enter a message."}), 400
+
+    log.info("Chat message received: %r | history length: %d", message, len(history))
+    start = time.time()
+
+    try:
+        reset_session()
+
+        prompt = build_chat_prompt(history, message)
+        agent_text = asyncio.run(run_chat_agent(prompt))
+
+        session = get_session()
+        log.info(
+            "Chat agent finished: %d papers found, %d downloaded",
+            len(session["papers"]),
+            len(session["downloaded"]),
+        )
+
+        # If papers were downloaded this session, produce structured summaries.
+        # If the agent only looked up existing downloads (no new downloads), use
+        # its text output directly — calling summarize_papers() would fail because
+        # it only summarizes files listed in session["downloaded"].
+        if session["papers"] and session["downloaded"]:
+            reply = summarize_papers(session, message)
+        elif agent_text.strip():
+            reply = agent_text
+        else:
+            error_report = _format_error_report(session)
+            reply = error_report if error_report else "I wasn't able to complete that request. Please try again or provide more detail."
+
+        elapsed = time.time() - start
+        log.info("Chat pipeline completed in %.2f seconds", elapsed)
+
+        session_files = []
+        for fname in session["downloaded"]:
+            path = os.path.join(DOWNLOADS_DIR, fname)
+            if os.path.exists(path):
+                size_kb = os.path.getsize(path) / 1024
+                session_files.append({"name": fname, "size_kb": round(size_kb, 1)})
+
+        return jsonify({
+            "reply": reply,
+            "files": session_files,
+            "search_query": session.get("search_query", ""),
+            "elapsed_seconds": round(elapsed, 2),
+        })
+
+    except Exception as e:
+        elapsed = time.time() - start
+        log.error("Chat failed after %.2f seconds: %s", elapsed, e)
+        session = get_session()
+        error_report = _format_error_report(session)
+        reply = f"### Request failed\n\n{error_report}" if error_report else f"### Request failed\n\n**Error:** {e}"
+        return jsonify({
+            "reply": reply,
+            "files": [],
+            "search_query": session.get("search_query", ""),
+            "elapsed_seconds": round(elapsed, 2),
+        })
+
+
+@app.route("/files")
+def list_all_files():
+    files = []
+    if os.path.exists(DOWNLOADS_DIR):
+        for f in sorted(os.listdir(DOWNLOADS_DIR)):
+            if f.lower().endswith(".pdf"):
+                path = os.path.join(DOWNLOADS_DIR, f)
+                size_kb = os.path.getsize(path) / 1024
+                files.append({"name": f, "size_kb": round(size_kb, 1)})
+    return jsonify({"files": files})
 
 
 if __name__ == "__main__":

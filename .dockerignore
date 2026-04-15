@@ -1,0 +1,24 @@
+# Secrets — never bake into the image
+.env
+
+# Local virtual environment
+venv/
+.venv/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local downloaded PDFs — these belong in the Docker volume, not the image
+downloads/
+
+# Git history
+.git/
+.gitignore
+
+# Docker files themselves (not needed inside the image)
+Dockerfile
+docker-compose.yml
+.dockerignore

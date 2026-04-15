@@ -3,432 +3,561 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>arXiv Paper Search</title>
+    <title>Arxivist</title>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
-        body {
+        html, body {
+            height: 100%;
+            overflow: hidden;
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: #0f1117;
             color: #e0e0e0;
-            min-height: 100vh;
         }
 
-        .container {
-            max-width: 960px;
-            margin: 0 auto;
-            padding: 2rem 1.5rem;
+        .app-wrapper {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
         }
 
-        h1 {
-            font-size: 1.8rem;
+        /* Header */
+        .app-header {
+            flex-shrink: 0;
+            background: #1a1d27;
+            border-bottom: 1px solid #2a2d3a;
+            padding: 0 1.5rem;
+            height: 52px;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .app-header h1 {
+            font-size: 1.15rem;
             font-weight: 600;
-            margin-bottom: 0.25rem;
             color: #fff;
         }
 
-        .subtitle {
-            color: #888;
-            font-size: 0.95rem;
-            margin-bottom: 2rem;
+        .app-header .subtitle {
+            font-size: 0.82rem;
+            color: #555;
         }
 
-        /* Search form */
-        .search-section {
+        /* Main area */
+        .app-main {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        /* Left panel */
+        .left-panel {
+            width: 300px;
+            flex-shrink: 0;
+            background: #1a1d27;
+            border-right: 1px solid #2a2d3a;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .left-panel-header {
+            flex-shrink: 0;
+            padding: 1rem 1.25rem;
+            border-bottom: 1px solid #2a2d3a;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .left-panel-header h2 {
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: #aaa;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .file-count-badge {
+            background: #5b6ef5;
+            color: #fff;
+            font-size: 0.7rem;
+            padding: 0.1rem 0.45rem;
+            border-radius: 10px;
+            margin-left: 0.4rem;
+        }
+
+        .file-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 0.75rem;
+        }
+
+        .file-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.45rem 0.6rem;
+            border-radius: 6px;
+            font-size: 0.82rem;
+            transition: background 0.15s;
+        }
+
+        .file-item:hover { background: #22253a; }
+
+        .file-name {
+            color: #8b9cf7;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 200px;
+        }
+
+        .file-size {
+            color: #555;
+            font-size: 0.78rem;
+            flex-shrink: 0;
+            margin-left: 0.5rem;
+        }
+
+        .file-list-empty {
+            color: #555;
+            font-size: 0.82rem;
+            padding: 0.5rem 0.25rem;
+            font-style: italic;
+        }
+
+        /* Right panel */
+        .right-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Messages area */
+        .messages-area {
+            flex: 1;
+            overflow-y: auto;
+            padding: 1.25rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        /* Message bubbles */
+        .msg-user {
+            align-self: flex-end;
+            background: #5b6ef5;
+            color: #fff;
+            border-radius: 12px 12px 2px 12px;
+            padding: 0.65rem 1rem;
+            max-width: 75%;
+            font-size: 0.9rem;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .msg-assistant {
+            align-self: flex-start;
             background: #1a1d27;
             border: 1px solid #2a2d3a;
-            border-radius: 12px;
-            padding: 1.5rem;
-            margin-bottom: 1.5rem;
+            border-radius: 2px 12px 12px 12px;
+            padding: 0.75rem 1rem;
+            max-width: 85%;
+            font-size: 0.875rem;
+            line-height: 1.65;
+            color: #ccc;
+            word-break: break-word;
         }
 
-        .search-row {
+        /* Markdown inside assistant messages */
+        .msg-assistant h1, .msg-assistant h2, .msg-assistant h3 {
+            color: #fff;
+            margin: 0.8rem 0 0.4rem;
+        }
+        .msg-assistant h3:first-child { margin-top: 0; }
+        .msg-assistant strong { color: #ddd; }
+        .msg-assistant p { margin-bottom: 0.4rem; }
+        .msg-assistant hr {
+            border: none;
+            border-top: 1px solid #2a2d3a;
+            margin: 0.75rem 0;
+        }
+        .msg-assistant code {
+            background: #12141c;
+            border-radius: 4px;
+            padding: 0.1em 0.4em;
+            font-size: 0.85em;
+        }
+        .msg-assistant pre {
+            background: #12141c;
+            border-radius: 6px;
+            padding: 0.75rem;
+            overflow-x: auto;
+            margin: 0.5rem 0;
+        }
+        .msg-assistant pre code {
+            background: none;
+            padding: 0;
+        }
+        .msg-assistant ul, .msg-assistant ol {
+            padding-left: 1.4rem;
+            margin-bottom: 0.4rem;
+        }
+
+        /* Typing indicator */
+        .typing-indicator {
+            align-self: flex-start;
+            background: #1a1d27;
+            border: 1px solid #2a2d3a;
+            border-radius: 2px 12px 12px 12px;
+            padding: 0.65rem 1rem;
+            display: flex;
+            align-items: center;
+            gap: 2px;
+        }
+
+        .typing-indicator span {
+            width: 6px;
+            height: 6px;
+            background: #555;
+            border-radius: 50%;
+            display: inline-block;
+            margin: 0 2px;
+            animation: bounce 0.9s infinite;
+        }
+
+        .typing-indicator span:nth-child(2) { animation-delay: 0.15s; }
+        .typing-indicator span:nth-child(3) { animation-delay: 0.3s; }
+
+        @keyframes bounce {
+            0%, 60%, 100% { transform: translateY(0); }
+            30% { transform: translateY(-5px); }
+        }
+
+        /* Input area */
+        .input-area {
+            flex-shrink: 0;
+            padding: 1rem 1.25rem;
+            border-top: 1px solid #2a2d3a;
+            background: #1a1d27;
+        }
+
+        .input-row {
             display: flex;
             gap: 0.75rem;
             align-items: flex-end;
         }
 
-        .input-group {
+        .textarea-wrapper {
+            position: relative;
+            flex: 1;
+        }
+
+        .resize-handle {
+            position: absolute;
+            top: 0;
+            right: 0;
+            width: 28px;
+            height: 18px;
+            cursor: n-resize;
             display: flex;
             flex-direction: column;
-            gap: 0.35rem;
+            align-items: center;
+            justify-content: center;
+            gap: 3px;
+            z-index: 10;
+            border-radius: 0 8px 0 0;
+            padding-top: 4px;
         }
 
-        .input-group.query { flex: 1; }
-        .input-group.authors { flex: 0.6; }
-        .input-group.max-results { width: 120px; }
-
-        label {
-            font-size: 0.8rem;
-            color: #999;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
-
-        input[type="text"], input[type="number"] {
-            background: #12141c;
-            border: 1px solid #333;
-            border-radius: 8px;
-            padding: 0.7rem 1rem;
-            color: #fff;
-            font-size: 0.95rem;
-            outline: none;
-            transition: border-color 0.2s;
-        }
-
-        input:focus { border-color: #5b6ef5; }
-
-        button {
-            background: #5b6ef5;
-            color: #fff;
-            border: none;
-            border-radius: 8px;
-            padding: 0.7rem 1.5rem;
-            font-size: 0.95rem;
-            font-weight: 500;
-            cursor: pointer;
-            transition: background 0.2s;
-            white-space: nowrap;
-        }
-
-        button:hover { background: #4a5ce0; }
-        button:disabled { background: #333; cursor: not-allowed; }
-
-        /* Status / loading */
-        .status {
-            margin-top: 1rem;
-            font-size: 0.9rem;
-            color: #888;
-            display: none;
-        }
-
-        .status.visible { display: flex; align-items: center; gap: 0.5rem; }
-
-        .status-text { line-height: 1.4; }
-
-        .search-terms {
+        .resize-handle span {
             display: block;
-            margin-top: 0.3rem;
-            color: #8b9cf7;
-            font-family: monospace;
-            font-size: 0.85rem;
-        }
-
-        .spinner {
-            width: 16px;
-            height: 16px;
-            border: 2px solid #333;
-            border-top-color: #5b6ef5;
-            border-radius: 50%;
-            animation: spin 0.8s linear infinite;
-            flex-shrink: 0;
-            align-self: flex-start;
-            margin-top: 2px;
-        }
-
-        @keyframes spin { to { transform: rotate(360deg); } }
-
-        /* Results */
-        .results-section {
-            background: #1a1d27;
-            border: 1px solid #2a2d3a;
-            border-radius: 12px;
-            padding: 1.5rem;
-            margin-bottom: 1.5rem;
-            display: none;
-        }
-
-        .results-section.visible { display: block; }
-
-        .results-header {
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-            margin-bottom: 1rem;
-        }
-
-        .results-header h2 {
-            font-size: 1.1rem;
-            color: #fff;
-        }
-
-        .meta-badges {
-            display: flex;
-            gap: 0.5rem;
-            flex-wrap: wrap;
-        }
-
-        .badge {
-            font-size: 0.75rem;
-            padding: 0.15rem 0.6rem;
-            border-radius: 10px;
-            display: none;
-        }
-
-        .badge.visible { display: inline-block; }
-        .badge.time { background: #1a3a1a; color: #6b7; }
-        .badge.query { background: #1a1a3a; color: #8b9cf7; font-family: monospace; }
-
-        /* Markdown-rendered results */
-        .results-content {
-            font-size: 0.9rem;
-            line-height: 1.7;
-            color: #ccc;
-            max-height: 700px;
-            overflow-y: auto;
-            padding-right: 0.5rem;
-        }
-
-        .results-content h3 {
-            color: #fff;
-            font-size: 1rem;
-            margin-top: 1.2rem;
-            margin-bottom: 0.5rem;
-        }
-
-        .results-content h3:first-child { margin-top: 0; }
-
-        .results-content strong { color: #ddd; }
-
-        .results-content p { margin-bottom: 0.4rem; }
-
-        .results-content hr {
-            border: none;
-            border-top: 1px solid #2a2d3a;
-            margin: 1rem 0;
-        }
-
-        .error-text { color: #f55b5b; }
-
-        /* Files panel */
-        .files-section {
-            background: #1a1d27;
-            border: 1px solid #2a2d3a;
-            border-radius: 12px;
-            padding: 1.5rem;
-            display: none;
-        }
-
-        .files-section.visible { display: block; }
-
-        .files-section h2 {
-            font-size: 1.1rem;
-            margin-bottom: 1rem;
-            color: #fff;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-        }
-
-        .file-count {
-            background: #5b6ef5;
-            color: #fff;
-            font-size: 0.75rem;
-            padding: 0.15rem 0.5rem;
-            border-radius: 10px;
-        }
-
-        .files-list {
-            list-style: none;
-        }
-
-        .files-list li {
-            display: flex;
-            justify-content: space-between;
-            padding: 0.5rem 0.75rem;
-            border-radius: 6px;
-            font-size: 0.9rem;
+            width: 14px;
+            height: 2px;
+            background: #444;
+            border-radius: 2px;
             transition: background 0.15s;
         }
 
-        .files-list li:hover { background: #22253a; }
+        .resize-handle:hover span { background: #888; }
 
-        .file-name { color: #8b9cf7; }
-        .file-size { color: #666; font-size: 0.85rem; }
+        .chat-textarea {
+            background: #12141c;
+            border: 1px solid #333;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 0.9rem;
+            font-family: inherit;
+            padding: 0.65rem 1rem;
+            resize: none;
+            min-height: 72px;
+            max-height: 300px;
+            width: 100%;
+            outline: none;
+            transition: border-color 0.2s;
+            line-height: 1.5;
+        }
+
+        .chat-textarea:focus { border-color: #5b6ef5; }
+
+        .send-btn {
+            background: #5b6ef5;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            padding: 0.65rem 1.1rem;
+            font-size: 0.9rem;
+            font-weight: 500;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: background 0.2s;
+            flex-shrink: 0;
+        }
+
+        .send-btn:hover:not(:disabled) { background: #4a5ce0; }
+        .send-btn:disabled { background: #333; cursor: not-allowed; }
+
+        .status-line {
+            margin-top: 0.4rem;
+            font-size: 0.78rem;
+            color: #666;
+            min-height: 1em;
+        }
+
+        .status-line .query-text {
+            font-family: monospace;
+            color: #8b9cf7;
+        }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>arXiv Paper Search</h1>
-        <p class="subtitle">Search, download, and summarize scientific papers using an AI agent</p>
+    <div class="app-wrapper">
+        <!-- Header -->
+        <header class="app-header">
+            <h1>Arxivist</h1>
+            <span class="subtitle">AI research assistant — search, download, and summarize papers</span>
+        </header>
 
-        <!-- Search -->
-        <div class="search-section">
-            <div class="search-row">
-                <div class="input-group query">
-                    <label for="query">Search Query</label>
-                    <input type="text" id="query"
-                           placeholder="e.g. transformer architectures for computer vision"
-                           autocomplete="off">
+        <!-- Main -->
+        <div class="app-main">
+            <!-- Left panel: file list -->
+            <aside class="left-panel">
+                <div class="left-panel-header">
+                    <h2>Downloaded Papers</h2>
+                    <span class="file-count-badge" id="fileCountBadge">0</span>
                 </div>
-                <div class="input-group authors">
-                    <label for="authors">Authors (optional)</label>
-                    <input type="text" id="authors"
-                           placeholder="e.g. LeCun, Hinton, Bengio"
-                           autocomplete="off">
+                <div class="file-list" id="fileList">
+                    <div class="file-list-empty">No papers yet</div>
                 </div>
-                <div class="input-group max-results">
-                    <label for="maxResults">Max Results</label>
-                    <input type="number" id="maxResults" value="10" min="1" max="50">
-                </div>
-                <button id="searchBtn" onclick="doSearch()">Search</button>
-            </div>
-            <div class="status" id="status">
-                <div class="spinner"></div>
-                <div class="status-text">
-                    <span>Agent is searching arXiv and downloading papers...</span>
-                    <span class="search-terms" id="statusTerms"></span>
-                </div>
-            </div>
-        </div>
+            </aside>
 
-        <!-- Results -->
-        <div class="results-section" id="resultsSection">
-            <div class="results-header">
-                <h2>Agent Results</h2>
-                <div class="meta-badges">
-                    <span class="badge query" id="badgeQuery"></span>
-                    <span class="badge time" id="badgeTime"></span>
+            <!-- Right panel: chat -->
+            <div class="right-panel">
+                <div class="messages-area" id="messagesArea"></div>
+
+                <div class="input-area">
+                    <div class="input-row">
+                        <div class="textarea-wrapper">
+                            <div class="resize-handle" id="resizeHandle">
+                                <span></span><span></span>
+                            </div>
+                            <textarea
+                                id="chatInput"
+                                class="chat-textarea"
+                                placeholder="Ask anything — find papers, summarize results, connect a database..."
+                                rows="1"
+                            ></textarea>
+                        </div>
+                        <button class="send-btn" id="sendBtn" onclick="sendMessage()">Send</button>
+                    </div>
+                    <div class="status-line" id="statusLine"></div>
                 </div>
             </div>
-            <div class="results-content" id="resultsContent"></div>
-        </div>
-
-        <!-- Files from this query -->
-        <div class="files-section" id="queryFilesSection">
-            <h2>
-                Downloaded Papers
-                <span class="file-count" id="queryFileCount">0</span>
-            </h2>
-            <ul class="files-list" id="queryFilesList"></ul>
         </div>
     </div>
 
     <script>
-        // Build a preview of what the arXiv query will look like from the input
-        function previewSearchTerms(queryText, authorsText) {
-            const stopWords = new Set([
-                'a','an','the','and','or','but','in','on','at','to','for','of',
-                'with','by','from','is','are','was','were','be','been','being',
-                'have','has','had','do','does','did','will','would','could',
-                'should','may','might','can','about','into','through','during',
-                'before','after','above','below','between','under','over','then',
-                'than','that','this','these','those','such','very','not','no',
-                'nor','so','if','when','how','what','which','who','whom','where',
-                'why','all','each','every','both','few','more','most','other',
-                'some','any','only','using'
-            ]);
+        const BASE = "{{ base }}";
+        const conversationHistory = [];
 
-            const terms = queryText.trim().split(/\s+/)
-                .filter(t => !stopWords.has(t.toLowerCase()))
-                .map(t => t.includes(':') ? t : `all:${t}`);
+        const messagesArea = document.getElementById('messagesArea');
+        const chatInput = document.getElementById('chatInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const statusLine = document.getElementById('statusLine');
+        const fileList = document.getElementById('fileList');
+        const fileCountBadge = document.getElementById('fileCountBadge');
 
-            if (authorsText.trim()) {
-                const authors = authorsText.split(',').map(a => a.trim()).filter(Boolean);
-                authors.forEach(a => terms.push(`au:${a}`));
-            }
-
-            return terms.join(' AND ');
+        function scrollToBottom() {
+            messagesArea.scrollTop = messagesArea.scrollHeight;
         }
 
-        async function doSearch() {
-            const queryVal = document.getElementById('query').value.trim();
-            const authors = document.getElementById('authors').value.trim();
-            const maxResults = parseInt(document.getElementById('maxResults').value) || 10;
-            const btn = document.getElementById('searchBtn');
-            const status = document.getElementById('status');
-            const statusTerms = document.getElementById('statusTerms');
-            const resultsSection = document.getElementById('resultsSection');
-            const resultsContent = document.getElementById('resultsContent');
-            const badgeTime = document.getElementById('badgeTime');
-            const badgeQuery = document.getElementById('badgeQuery');
-            const filesSection = document.getElementById('queryFilesSection');
-
-            if (!queryVal) {
-                alert('Please enter a search query.');
-                return;
+        function appendMessage(role, content) {
+            const div = document.createElement('div');
+            if (role === 'user') {
+                div.className = 'msg-user';
+                div.textContent = content;
+            } else {
+                div.className = 'msg-assistant';
+                div.innerHTML = marked.parse(content);
             }
+            messagesArea.appendChild(div);
+            scrollToBottom();
+            return div;
+        }
 
-            // Show loading state immediately WITH the predicted search terms
-            btn.disabled = true;
-            const preview = previewSearchTerms(queryVal, authors);
-            statusTerms.textContent = preview;
-            status.classList.add('visible');
-            resultsSection.classList.remove('visible');
-            filesSection.classList.remove('visible');
-            badgeTime.classList.remove('visible');
-            badgeQuery.classList.remove('visible');
+        function showTypingIndicator() {
+            const div = document.createElement('div');
+            div.className = 'typing-indicator';
+            div.id = 'typingIndicator';
+            div.innerHTML = '<span></span><span></span><span></span>';
+            messagesArea.appendChild(div);
+            scrollToBottom();
+        }
+
+        function removeTypingIndicator() {
+            const el = document.getElementById('typingIndicator');
+            if (el) el.remove();
+        }
+
+        async function sendMessage() {
+            const message = chatInput.value.trim();
+            if (!message || sendBtn.disabled) return;
+
+            // Show user bubble
+            appendMessage('user', message);
+            conversationHistory.push({ role: 'user', content: message });
+
+            // Clear and reset textarea
+            chatInput.value = '';
+            chatInput.style.height = 'auto';
+
+            // Disable input while waiting
+            sendBtn.disabled = true;
+            chatInput.disabled = true;
+            showTypingIndicator();
+            statusLine.textContent = '';
 
             try {
-                const resp = await fetch('/search', {
+                const resp = await fetch(BASE + '/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ query: queryVal, authors, max_results: maxResults }),
+                    body: JSON.stringify({
+                        message,
+                        history: conversationHistory.slice(0, -1) // exclude the one we just added
+                    }),
                 });
 
                 const data = await resp.json();
-
-                resultsSection.classList.add('visible');
+                removeTypingIndicator();
 
                 if (data.error) {
-                    // Hard error (e.g. empty query) — no markdown
-                    resultsContent.innerHTML = `<span class="error-text">${data.error}</span>`;
-                } else if (data.result) {
-                    // Render markdown — works for both success summaries
-                    // and formatted error reports (rate limit, timeout, etc.)
-                    resultsContent.innerHTML = marked.parse(data.result);
+                    appendMessage('assistant', `**Error:** ${data.error}`);
+                } else {
+                    const reply = data.reply || 'No response received.';
+                    appendMessage('assistant', reply);
+                    conversationHistory.push({ role: 'assistant', content: reply });
 
-                    // Show files only if there are any
-                    if (data.files && data.files.length > 0) {
-                        updateQueryFiles(data.files);
-                    }
-
-                    // Show badges
+                    // Update status line
+                    const parts = [];
                     if (data.search_query) {
-                        badgeQuery.textContent = data.search_query;
-                        badgeQuery.classList.add('visible');
+                        parts.push(`arXiv query: <span class="query-text">${escapeHtml(data.search_query)}</span>`);
                     }
                     if (data.elapsed_seconds != null) {
-                        badgeTime.textContent = `${data.elapsed_seconds}s`;
-                        badgeTime.classList.add('visible');
+                        parts.push(`${data.elapsed_seconds}s`);
                     }
-                } else {
-                    resultsContent.innerHTML = '<span class="error-text">No response received from the server.</span>';
+                    statusLine.innerHTML = parts.join(' &nbsp;·&nbsp; ');
+
+                    refreshFiles();
                 }
             } catch (err) {
-                resultsSection.classList.add('visible');
-                resultsContent.innerHTML = `<span class="error-text">Network error: ${err.message}</span>`;
+                removeTypingIndicator();
+                appendMessage('assistant', `**Network error:** ${err.message}`);
             } finally {
-                btn.disabled = false;
-                status.classList.remove('visible');
+                sendBtn.disabled = false;
+                chatInput.disabled = false;
+                chatInput.focus();
             }
         }
 
-        function updateQueryFiles(files) {
-            const section = document.getElementById('queryFilesSection');
-            const list = document.getElementById('queryFilesList');
-            const count = document.getElementById('queryFileCount');
+        async function refreshFiles() {
+            try {
+                const resp = await fetch(BASE + '/files');
+                const data = await resp.json();
+                const files = data.files || [];
 
-            if (!files || files.length === 0) {
-                section.classList.remove('visible');
-                return;
+                fileCountBadge.textContent = files.length;
+
+                if (files.length === 0) {
+                    fileList.innerHTML = '<div class="file-list-empty">No papers yet</div>';
+                } else {
+                    fileList.innerHTML = files.map(f => `
+                        <div class="file-item">
+                            <span class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
+                            <span class="file-size">${f.size_kb} KB</span>
+                        </div>
+                    `).join('');
+                }
+            } catch (err) {
+                // Silently ignore refresh errors
             }
-
-            section.classList.add('visible');
-            count.textContent = files.length;
-            list.innerHTML = files.map(f =>
-                `<li>
-                    <span class="file-name">${f.name}</span>
-                    <span class="file-size">${f.size_kb} KB</span>
-                </li>`
-            ).join('');
         }
 
-        // Allow Enter key to trigger search
-        document.getElementById('query').addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') doSearch();
+        function escapeHtml(str) {
+            return str
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
+        // Textarea: Enter sends, Shift+Enter newline, auto-resize
+        chatInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
         });
+
+        chatInput.addEventListener('input', () => {
+            chatInput.style.height = 'auto';
+            chatInput.style.height = Math.min(chatInput.scrollHeight, 300) + 'px';
+        });
+
+        // Custom top-right resize handle — dragging up expands, down shrinks
+        const resizeHandle = document.getElementById('resizeHandle');
+        let isResizing = false;
+        let resizeStartY = 0;
+        let resizeStartHeight = 0;
+
+        resizeHandle.addEventListener('mousedown', (e) => {
+            isResizing = true;
+            resizeStartY = e.clientY;
+            resizeStartHeight = chatInput.offsetHeight;
+            document.body.style.cursor = 'n-resize';
+            document.body.style.userSelect = 'none';
+            e.preventDefault();
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isResizing) return;
+            const deltaY = resizeStartY - e.clientY; // up = positive
+            const newHeight = Math.min(Math.max(resizeStartHeight + deltaY, 72), 300);
+            chatInput.style.height = newHeight + 'px';
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (!isResizing) return;
+            isResizing = false;
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+        });
+
+        // Initial file load
+        refreshFiles();
     </script>
 </body>
 </html>
