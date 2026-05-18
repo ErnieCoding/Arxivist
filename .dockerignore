@@ -11,8 +11,10 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Local downloaded PDFs — these belong in the Docker volume, not the image
+# Local content directories — these belong in Docker named volumes, not the image
 downloads/
+uploads/
+dashboards/
 
 # Git history
 .git/

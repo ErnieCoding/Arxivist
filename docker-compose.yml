@@ -25,6 +25,10 @@ services:
       # On first run Docker seeds this volume from the image's .claude/skills/ contents,
       # so all built-in skills (searching-arxiv, summarizing-papers, etc.) are available.
       - arxivist_skills:/app/.claude/skills
+      # User-uploaded documents (pdf/docx/md/txt) attached to chat messages.
+      - arxivist_uploads:/app/uploads
+      # Generated dashboards (one HTML file per UUID) plus registry.json.
+      - arxivist_dashboards:/app/dashboards
 
     logging:
       driver: "json-file"
@@ -35,3 +39,5 @@ services:
 volumes:
   arxivist_downloads:
   arxivist_skills:
+  arxivist_uploads:
+  arxivist_dashboards:

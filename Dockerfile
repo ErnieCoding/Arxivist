@@ -17,7 +17,7 @@ COPY . .
 
 # Ensure the persistent directories exist in the image so Docker can seed
 # named volumes from them on first run.
-RUN mkdir -p downloads .claude/skills
+RUN mkdir -p downloads .claude/skills uploads dashboards
 
 # The app listens on this port inside the container.
 # docker-compose maps it to 127.0.0.1:5050 on the host.

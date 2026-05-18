@@ -52,7 +52,7 @@
             overflow: hidden;
         }
 
-        /* Left panel */
+        /* Left panel — vertically split into Papers + Dashboards */
         .left-panel {
             width: 300px;
             flex-shrink: 0;
@@ -63,9 +63,42 @@
             overflow: hidden;
         }
 
+        .panel-section {
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            min-height: 80px;
+        }
+
+        .panel-section--papers { flex: 0 0 50%; }
+        .panel-section--dashboards { flex: 1 1 auto; }
+
+        .panel-resize-handle {
+            flex-shrink: 0;
+            height: 6px;
+            background: #14161e;
+            border-top: 1px solid #2a2d3a;
+            border-bottom: 1px solid #2a2d3a;
+            cursor: ns-resize;
+            position: relative;
+        }
+        .panel-resize-handle::after {
+            content: '';
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            width: 28px;
+            height: 2px;
+            background: #444;
+            border-radius: 2px;
+            transition: background 0.15s;
+        }
+        .panel-resize-handle:hover::after { background: #888; }
+
         .left-panel-header {
             flex-shrink: 0;
-            padding: 1rem 1.25rem;
+            padding: 0.9rem 1.25rem;
             border-bottom: 1px solid #2a2d3a;
             display: flex;
             align-items: center;
@@ -80,7 +113,7 @@
             letter-spacing: 0.05em;
         }
 
-        .file-count-badge {
+        .count-badge {
             background: #5b6ef5;
             color: #fff;
             font-size: 0.7rem;
@@ -89,13 +122,13 @@
             margin-left: 0.4rem;
         }
 
-        .file-list {
+        .scroll-list {
             flex: 1;
             overflow-y: auto;
-            padding: 0.75rem;
+            padding: 0.6rem;
         }
 
-        .file-item {
+        .file-item, .dashboard-item {
             display: flex;
             justify-content: space-between;
             align-items: center;
@@ -105,7 +138,7 @@
             transition: background 0.15s;
         }
 
-        .file-item:hover { background: #22253a; }
+        .file-item:hover, .dashboard-item:hover { background: #22253a; }
 
         .file-name {
             color: #8b9cf7;
@@ -122,11 +155,36 @@
             margin-left: 0.5rem;
         }
 
-        .file-list-empty {
+        .scroll-list-empty {
             color: #555;
             font-size: 0.82rem;
             padding: 0.5rem 0.25rem;
             font-style: italic;
+        }
+
+        .dashboard-item {
+            cursor: pointer;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 2px;
+        }
+        .dashboard-item-title {
+            color: #8b9cf7;
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 100%;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 0.5rem;
+            width: 100%;
+        }
+        .dashboard-item-title .ext-arrow { color: #555; font-size: 0.78rem; flex-shrink: 0; }
+        .dashboard-item-age {
+            color: #555;
+            font-size: 0.72rem;
         }
 
         /* Right panel */
@@ -158,6 +216,13 @@
             font-size: 0.9rem;
             white-space: pre-wrap;
             word-break: break-word;
+        }
+        .msg-user .msg-attachments {
+            display: block;
+            margin-top: 0.35rem;
+            font-size: 0.75rem;
+            color: rgba(255, 255, 255, 0.75);
+            font-style: italic;
         }
 
         .msg-assistant {
@@ -207,6 +272,19 @@
             padding-left: 1.4rem;
             margin-bottom: 0.4rem;
         }
+        .msg-assistant a[href*="/d/"]::after { content: " \2197"; color: #8b9cf7; }
+
+        .msg-meta {
+            align-self: flex-start;
+            font-size: 0.7rem;
+            color: #555;
+            margin: -0.35rem 0 0.25rem 0.4rem;
+            letter-spacing: 0.02em;
+        }
+        .msg-meta--user {
+            align-self: flex-end;
+            margin: -0.35rem 0.4rem 0.25rem 0;
+        }
 
         /* Typing indicator */
         .typing-indicator {
@@ -246,15 +324,81 @@
             background: #1a1d27;
         }
 
+        /* Attachment chips above the input row */
+        .attach-chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.4rem;
+            margin-bottom: 0.5rem;
+        }
+        .attach-chips:empty { display: none; }
+        .attach-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            background: #22253a;
+            border: 1px solid #2a2d3a;
+            padding: 0.25rem 0.55rem;
+            border-radius: 999px;
+            font-size: 0.78rem;
+            color: #ccc;
+            max-width: 240px;
+        }
+        .attach-chip .chip-name {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .attach-chip .chip-x {
+            background: none;
+            border: none;
+            color: #888;
+            cursor: pointer;
+            padding: 0 0.15rem;
+            font-size: 0.95rem;
+            line-height: 1;
+        }
+        .attach-chip .chip-x:hover { color: #fff; }
+        .attach-chip.uploading { opacity: 0.65; }
+        .attach-chip.uploading .chip-name::after {
+            content: " …";
+            color: #8b9cf7;
+        }
+        .attach-chip.error {
+            border-color: rgba(239, 68, 68, 0.5);
+            color: #ef4444;
+        }
+
         .input-row {
             display: flex;
-            gap: 0.75rem;
+            gap: 0.6rem;
             align-items: flex-end;
         }
+
+        .attach-btn {
+            background: #22253a;
+            color: #ccc;
+            border: 1px solid #2a2d3a;
+            border-radius: 8px;
+            padding: 0.65rem 0.85rem;
+            font-size: 1.1rem;
+            line-height: 1;
+            cursor: pointer;
+            transition: background 0.15s, color 0.15s;
+            flex-shrink: 0;
+        }
+        .attach-btn:hover:not(:disabled) { background: #2a2e3f; color: #fff; }
+        .attach-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
         .textarea-wrapper {
             position: relative;
             flex: 1;
+        }
+
+        .textarea-wrapper.drop-active {
+            outline: 2px dashed #5b6ef5;
+            outline-offset: 2px;
+            border-radius: 8px;
         }
 
         .resize-handle {
@@ -339,19 +483,33 @@
         <!-- Header -->
         <header class="app-header">
             <h1>Arxivist</h1>
-            <span class="subtitle">AI research assistant — search, download, and summarize papers</span>
+            <span class="subtitle">AI research assistant — search, summarize, build dashboards</span>
         </header>
 
         <!-- Main -->
         <div class="app-main">
-            <!-- Left panel: file list -->
-            <aside class="left-panel">
-                <div class="left-panel-header">
-                    <h2>Downloaded Papers</h2>
-                    <span class="file-count-badge" id="fileCountBadge">0</span>
+            <!-- Left panel: Papers + Dashboards (resizable split) -->
+            <aside class="left-panel" id="leftPanel">
+                <div class="panel-section panel-section--papers" id="papersPanel">
+                    <div class="left-panel-header">
+                        <h2>Downloaded Papers</h2>
+                        <span class="count-badge" id="fileCountBadge">0</span>
+                    </div>
+                    <div class="scroll-list" id="fileList">
+                        <div class="scroll-list-empty">No papers yet</div>
+                    </div>
                 </div>
-                <div class="file-list" id="fileList">
-                    <div class="file-list-empty">No papers yet</div>
+
+                <div class="panel-resize-handle" id="panelResizeHandle" title="Drag to resize"></div>
+
+                <div class="panel-section panel-section--dashboards" id="dashboardsPanel">
+                    <div class="left-panel-header">
+                        <h2>Dashboards</h2>
+                        <span class="count-badge" id="dashboardCountBadge">0</span>
+                    </div>
+                    <div class="scroll-list" id="dashboardList">
+                        <div class="scroll-list-empty">No dashboards yet</div>
+                    </div>
                 </div>
             </aside>
 
@@ -360,15 +518,18 @@
                 <div class="messages-area" id="messagesArea"></div>
 
                 <div class="input-area">
+                    <div class="attach-chips" id="attachChips"></div>
                     <div class="input-row">
-                        <div class="textarea-wrapper">
+                        <button class="attach-btn" id="attachBtn" title="Attach a file (PDF, DOCX, MD, TXT)" aria-label="Attach file">+</button>
+                        <input type="file" id="fileInput" multiple accept=".pdf,.docx,.md,.txt" style="display:none">
+                        <div class="textarea-wrapper" id="textareaWrapper">
                             <div class="resize-handle" id="resizeHandle">
                                 <span></span><span></span>
                             </div>
                             <textarea
                                 id="chatInput"
                                 class="chat-textarea"
-                                placeholder="Ask anything — find papers, summarize results, connect a database..."
+                                placeholder="Ask anything — find papers, build a dashboard from an upload, edit one..."
                                 rows="1"
                             ></textarea>
                         </div>
@@ -384,29 +545,84 @@
         const BASE = "{{ base }}";
         const conversationHistory = [];
 
+        // Session ID — minted once per browser, persisted in localStorage.
+        const SESSION_ID = (() => {
+            let id = localStorage.getItem('arxivist_session_id');
+            if (!id) {
+                id = (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36));
+                localStorage.setItem('arxivist_session_id', id);
+            }
+            return id;
+        })();
+
         const messagesArea = document.getElementById('messagesArea');
         const chatInput = document.getElementById('chatInput');
         const sendBtn = document.getElementById('sendBtn');
         const statusLine = document.getElementById('statusLine');
         const fileList = document.getElementById('fileList');
         const fileCountBadge = document.getElementById('fileCountBadge');
+        const dashboardList = document.getElementById('dashboardList');
+        const dashboardCountBadge = document.getElementById('dashboardCountBadge');
+        const attachBtn = document.getElementById('attachBtn');
+        const fileInput = document.getElementById('fileInput');
+        const attachChipsEl = document.getElementById('attachChips');
+        const textareaWrapper = document.getElementById('textareaWrapper');
+        const papersPanel = document.getElementById('papersPanel');
+        const panelResizeHandle = document.getElementById('panelResizeHandle');
+
+        let attachedFiles = []; // [{file_id, name, size, char_count, parse_mode, text_preview}]
+        let nextChipId = 1;
+
+        function escapeHtml(str) {
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
 
         function scrollToBottom() {
             messagesArea.scrollTop = messagesArea.scrollHeight;
         }
 
-        function appendMessage(role, content) {
+        function formatClock(date) {
+            return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        }
+
+        function appendMessage(role, content, attachments) {
             const div = document.createElement('div');
             if (role === 'user') {
                 div.className = 'msg-user';
                 div.textContent = content;
+                if (attachments && attachments.length) {
+                    const note = document.createElement('span');
+                    note.className = 'msg-attachments';
+                    note.textContent = '📎 ' + attachments.map(a => a.name).join(', ');
+                    div.appendChild(note);
+                }
             } else {
                 div.className = 'msg-assistant';
                 div.innerHTML = marked.parse(content);
+                // Make /d/<uuid> dashboard links open in a new tab.
+                div.querySelectorAll('a[href*="/d/"]').forEach(a => { a.target = '_blank'; a.rel = 'noopener'; });
             }
             messagesArea.appendChild(div);
             scrollToBottom();
             return div;
+        }
+
+        function appendMeta(role, { elapsedSeconds } = {}) {
+            const meta = document.createElement('div');
+            meta.className = 'msg-meta' + (role === 'user' ? ' msg-meta--user' : '');
+            const time = formatClock(new Date());
+            if (role === 'assistant' && elapsedSeconds != null) {
+                meta.textContent = `${time} · ${elapsedSeconds}s`;
+            } else {
+                meta.textContent = time;
+            }
+            messagesArea.appendChild(meta);
+            scrollToBottom();
+            return meta;
         }
 
         function showTypingIndicator() {
@@ -423,21 +639,109 @@
             if (el) el.remove();
         }
 
+        // ===== File upload =====
+
+        attachBtn.addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', (e) => {
+            uploadFiles(Array.from(e.target.files));
+            fileInput.value = ''; // allow re-selecting the same file
+        });
+
+        function makeChip({ chipId, name, state }) {
+            const chip = document.createElement('div');
+            chip.className = 'attach-chip' + (state ? ' ' + state : '');
+            chip.dataset.chipId = String(chipId);
+            chip.innerHTML = `
+                <span class="chip-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+                <button class="chip-x" type="button" aria-label="Remove">×</button>
+            `;
+            chip.querySelector('.chip-x').addEventListener('click', () => removeChip(chipId));
+            return chip;
+        }
+
+        function removeChip(chipId) {
+            const chip = attachChipsEl.querySelector(`[data-chip-id="${chipId}"]`);
+            if (chip) chip.remove();
+            attachedFiles = attachedFiles.filter(f => f._chipId !== chipId);
+        }
+
+        async function uploadFiles(files) {
+            for (const file of files) {
+                const chipId = nextChipId++;
+                const chip = makeChip({ chipId, name: file.name, state: 'uploading' });
+                attachChipsEl.appendChild(chip);
+
+                const form = new FormData();
+                form.append('file', file, file.name);
+                try {
+                    const resp = await fetch(BASE + '/upload', { method: 'POST', body: form });
+                    const data = await resp.json();
+                    if (!resp.ok || (data.errors && data.errors.length && (!data.files || !data.files.length))) {
+                        const detail = (data.errors && data.errors[0] && data.errors[0].detail) || data.error || 'Upload failed.';
+                        chip.classList.remove('uploading');
+                        chip.classList.add('error');
+                        chip.querySelector('.chip-name').textContent = `${file.name} — ${detail}`;
+                        continue;
+                    }
+                    const meta = (data.files || [])[0];
+                    if (!meta) {
+                        chip.classList.add('error');
+                        chip.querySelector('.chip-name').textContent = `${file.name} — no metadata returned`;
+                        continue;
+                    }
+                    chip.classList.remove('uploading');
+                    attachedFiles.push({ ...meta, _chipId: chipId });
+                } catch (err) {
+                    chip.classList.remove('uploading');
+                    chip.classList.add('error');
+                    chip.querySelector('.chip-name').textContent = `${file.name} — ${err.message}`;
+                }
+            }
+        }
+
+        // ===== Drag-and-drop on the textarea =====
+
+        ['dragenter', 'dragover'].forEach(ev => {
+            textareaWrapper.addEventListener(ev, (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                textareaWrapper.classList.add('drop-active');
+            });
+        });
+        ['dragleave', 'drop'].forEach(ev => {
+            textareaWrapper.addEventListener(ev, (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (ev === 'dragleave' && e.target !== textareaWrapper) return;
+                textareaWrapper.classList.remove('drop-active');
+            });
+        });
+        textareaWrapper.addEventListener('drop', (e) => {
+            const files = Array.from(e.dataTransfer.files || []);
+            if (files.length) uploadFiles(files);
+        });
+
+        // ===== Send message =====
+
         async function sendMessage() {
             const message = chatInput.value.trim();
             if (!message || sendBtn.disabled) return;
 
-            // Show user bubble
-            appendMessage('user', message);
+            const sentAttachments = attachedFiles.slice();
+
+            appendMessage('user', message, sentAttachments);
+            appendMeta('user');
             conversationHistory.push({ role: 'user', content: message });
 
-            // Clear and reset textarea
             chatInput.value = '';
             chatInput.style.height = 'auto';
+            // Clear attachments now that the message has been sent.
+            attachedFiles = [];
+            attachChipsEl.innerHTML = '';
 
-            // Disable input while waiting
             sendBtn.disabled = true;
             chatInput.disabled = true;
+            attachBtn.disabled = true;
             showTypingIndicator();
             statusLine.textContent = '';
 
@@ -447,7 +751,9 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         message,
-                        history: conversationHistory.slice(0, -1) // exclude the one we just added
+                        history: conversationHistory.slice(0, -1),
+                        session_id: SESSION_ID,
+                        attached_file_ids: sentAttachments.map(f => f.file_id),
                     }),
                 });
 
@@ -456,43 +762,45 @@
 
                 if (data.error) {
                     appendMessage('assistant', `**Error:** ${data.error}`);
+                    appendMeta('assistant', { elapsedSeconds: data.elapsed_seconds });
                 } else {
                     const reply = data.reply || 'No response received.';
                     appendMessage('assistant', reply);
+                    appendMeta('assistant', { elapsedSeconds: data.elapsed_seconds });
                     conversationHistory.push({ role: 'assistant', content: reply });
 
-                    // Update status line
-                    const parts = [];
                     if (data.search_query) {
-                        parts.push(`arXiv query: <span class="query-text">${escapeHtml(data.search_query)}</span>`);
+                        statusLine.innerHTML = `arXiv query: <span class="query-text">${escapeHtml(data.search_query)}</span>`;
+                    } else {
+                        statusLine.textContent = '';
                     }
-                    if (data.elapsed_seconds != null) {
-                        parts.push(`${data.elapsed_seconds}s`);
-                    }
-                    statusLine.innerHTML = parts.join(' &nbsp;·&nbsp; ');
 
                     refreshFiles();
+                    refreshDashboards();
                 }
             } catch (err) {
                 removeTypingIndicator();
                 appendMessage('assistant', `**Network error:** ${err.message}`);
+                appendMeta('assistant');
             } finally {
                 sendBtn.disabled = false;
                 chatInput.disabled = false;
+                attachBtn.disabled = false;
                 chatInput.focus();
             }
         }
+
+        // ===== Sidebar refresh =====
 
         async function refreshFiles() {
             try {
                 const resp = await fetch(BASE + '/files');
                 const data = await resp.json();
                 const files = data.files || [];
-
                 fileCountBadge.textContent = files.length;
 
                 if (files.length === 0) {
-                    fileList.innerHTML = '<div class="file-list-empty">No papers yet</div>';
+                    fileList.innerHTML = '<div class="scroll-list-empty">No papers yet</div>';
                 } else {
                     fileList.innerHTML = files.map(f => `
                         <div class="file-item">
@@ -501,20 +809,89 @@
                         </div>
                     `).join('');
                 }
-            } catch (err) {
-                // Silently ignore refresh errors
-            }
+            } catch (err) { /* silent */ }
         }
 
-        function escapeHtml(str) {
-            return str
-                .replace(/&/g, '&amp;')
-                .replace(/</g, '&lt;')
-                .replace(/>/g, '&gt;')
-                .replace(/"/g, '&quot;');
+        function relativeTime(unixSec) {
+            const now = Date.now() / 1000;
+            const delta = Math.max(0, now - unixSec);
+            if (delta < 60) return 'just now';
+            if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
+            if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
+            const d = new Date(unixSec * 1000);
+            return d.toISOString().slice(0, 10);
         }
 
-        // Textarea: Enter sends, Shift+Enter newline, auto-resize
+        async function refreshDashboards() {
+            try {
+                const resp = await fetch(BASE + '/dashboards');
+                const data = await resp.json();
+                const items = data.dashboards || [];
+                dashboardCountBadge.textContent = items.length;
+
+                if (items.length === 0) {
+                    dashboardList.innerHTML = '<div class="scroll-list-empty">No dashboards yet</div>';
+                } else {
+                    dashboardList.innerHTML = items.map(d => {
+                        const url = BASE + '/d/' + d.uuid;
+                        const title = d.title || d.uuid.slice(0, 8);
+                        const age = relativeTime(d.created_at || 0);
+                        return `
+                            <div class="dashboard-item" data-url="${escapeHtml(url)}" title="${escapeHtml(title)}">
+                                <span class="dashboard-item-title">
+                                    <span class="title-text">${escapeHtml(title)}</span>
+                                    <span class="ext-arrow">↗</span>
+                                </span>
+                                <span class="dashboard-item-age">${age}</span>
+                            </div>
+                        `;
+                    }).join('');
+                    dashboardList.querySelectorAll('.dashboard-item').forEach(el => {
+                        el.addEventListener('click', () => {
+                            window.open(el.dataset.url, '_blank', 'noopener');
+                        });
+                    });
+                }
+            } catch (err) { /* silent */ }
+        }
+
+        // ===== Sidebar vertical resize =====
+
+        const SAVED_PAPERS_FLEX = 'arxivist_papers_flex';
+        function applySavedPapersFlex() {
+            const saved = localStorage.getItem(SAVED_PAPERS_FLEX);
+            if (saved) papersPanel.style.flex = saved;
+        }
+        applySavedPapersFlex();
+
+        let panelDrag = false;
+        let panelStartY = 0;
+        let papersStartHeight = 0;
+        panelResizeHandle.addEventListener('mousedown', (e) => {
+            panelDrag = true;
+            panelStartY = e.clientY;
+            papersStartHeight = papersPanel.offsetHeight;
+            document.body.style.cursor = 'ns-resize';
+            document.body.style.userSelect = 'none';
+            e.preventDefault();
+        });
+        document.addEventListener('mousemove', (e) => {
+            if (!panelDrag) return;
+            const delta = e.clientY - panelStartY;
+            const total = panelResizeHandle.parentElement.clientHeight;
+            const newHeight = Math.min(Math.max(papersStartHeight + delta, 80), total - 120);
+            papersPanel.style.flex = `0 0 ${newHeight}px`;
+        });
+        document.addEventListener('mouseup', () => {
+            if (!panelDrag) return;
+            panelDrag = false;
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+            localStorage.setItem(SAVED_PAPERS_FLEX, papersPanel.style.flex);
+        });
+
+        // ===== Textarea behavior =====
+
         chatInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
@@ -527,12 +904,10 @@
             chatInput.style.height = Math.min(chatInput.scrollHeight, 300) + 'px';
         });
 
-        // Custom top-right resize handle — dragging up expands, down shrinks
         const resizeHandle = document.getElementById('resizeHandle');
         let isResizing = false;
         let resizeStartY = 0;
         let resizeStartHeight = 0;
-
         resizeHandle.addEventListener('mousedown', (e) => {
             isResizing = true;
             resizeStartY = e.clientY;
@@ -541,14 +916,12 @@
             document.body.style.userSelect = 'none';
             e.preventDefault();
         });
-
         document.addEventListener('mousemove', (e) => {
             if (!isResizing) return;
-            const deltaY = resizeStartY - e.clientY; // up = positive
+            const deltaY = resizeStartY - e.clientY;
             const newHeight = Math.min(Math.max(resizeStartHeight + deltaY, 72), 300);
             chatInput.style.height = newHeight + 'px';
         });
-
         document.addEventListener('mouseup', () => {
             if (!isResizing) return;
             isResizing = false;
@@ -556,8 +929,9 @@
             document.body.style.userSelect = '';
         });
 
-        // Initial file load
+        // ===== Initial load =====
         refreshFiles();
+        refreshDashboards();
     </script>
 </body>
 </html>

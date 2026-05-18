@@ -8,7 +8,14 @@
       "Bash(mkdir -p /c/Users/saaki/Desktop/RConf/Arxiv-Search/static)",
       "Bash(python:*)",
       "Bash(venv/Scripts/python:*)",
-      "Bash(venv/Scripts/pip list:*)"
+      "Bash(venv/Scripts/pip list:*)",
+      "WebFetch(domain:ai.rconf.ru)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('app.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(deactivate)",
+      "Read(//tmp/**)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/home/ernest/Desktop/Misc/RConf/Arxivist/app.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(docker volume *)"
     ]
   }
 }
