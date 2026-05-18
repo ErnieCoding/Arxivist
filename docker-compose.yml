@@ -19,25 +19,17 @@ services:
       - APP_BASE=/arxivist
 
     volumes:
-      # Downloaded PDFs — persist across restarts and image upgrades.
-      - arxivist_downloads:/app/downloads
-      # Agent-created skill files — persist across restarts and image upgrades.
-      # On first run Docker seeds this volume from the image's .claude/skills/ contents,
-      # so all built-in skills (searching-arxiv, summarizing-papers, etc.) are available.
-      - arxivist_skills:/app/.claude/skills
-      # User-uploaded documents (pdf/docx/md/txt) attached to chat messages.
-      - arxivist_uploads:/app/uploads
-      # Generated dashboards (one HTML file per UUID) plus registry.json.
-      - arxivist_dashboards:/app/dashboards
+      # Bind-mount everything to the project tree so contents are visible on the
+      # host and `git pull` immediately updates skills inside the container.
+      # Files written by the container will be root-owned on Linux — use sudo
+      # to delete or `chown -R $USER:$USER <dir>` after a session to clean up.
+      - ./downloads:/app/downloads
+      - ./.claude/skills:/app/.claude/skills
+      - ./uploads:/app/uploads
+      - ./dashboards:/app/dashboards
 
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
-
-volumes:
-  arxivist_downloads:
-  arxivist_skills:
-  arxivist_uploads:
-  arxivist_dashboards:
