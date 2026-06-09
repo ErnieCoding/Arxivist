@@ -20,7 +20,8 @@
       "Bash(python3 -c \"import anthropic; help\\(anthropic.Anthropic.__init__\\)\")",
       "Bash(python3)",
       "Bash(chmod +x /home/ernest/Desktop/Misc/RConf/Arxivist/entrypoint.sh)",
-      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/home/ernest/Desktop/Misc/RConf/Arxivist/bridge/bridge.py'\\).read\\(\\)\\); print\\('bridge.py: OK'\\)\")"
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/home/ernest/Desktop/Misc/RConf/Arxivist/bridge/bridge.py'\\).read\\(\\)\\); print\\('bridge.py: OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/home/ernest/Desktop/Misc/RConf/Arxivist/bridge/bridge.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
     ]
   }
 }

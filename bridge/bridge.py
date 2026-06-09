@@ -74,6 +74,16 @@ BRIDGE_WEBHOOK_HOST = os.environ.get("BRIDGE_WEBHOOK_HOST", "0.0.0.0")
 BRIDGE_WEBHOOK_PORT = int(os.environ.get("BRIDGE_WEBHOOK_PORT", "9998"))
 BRIDGE_LOG_LEVEL = os.environ.get("BRIDGE_LOG_LEVEL", "INFO").upper()
 
+# Comma-separated list of fields to drop from the forwarded body. Some proxies
+# run older Anthropic Python SDKs that reject newer kwargs (e.g.
+# context_management, added by the Claude Agent SDK). Default strips the
+# fields we've seen cause failures; add more here without code changes.
+BRIDGE_STRIP_FIELDS = {
+    f.strip()
+    for f in os.environ.get("BRIDGE_STRIP_FIELDS", "context_management").split(",")
+    if f.strip()
+}
+
 # In-flight requests: callback_token -> asyncio.Future that resolves with the
 # webhook payload. The same process serves both the fake API and the webhook
 # receiver, so this dict is the rendezvous point.
@@ -212,7 +222,8 @@ async def messages_handler(request: web.Request) -> web.StreamResponse:
     requests, forwards them through the proxy, awaits the webhook, and
     returns the response either as JSON or as a synthesized SSE stream.
     """
-    path = request.path  # "/v1/messages" or "/v1/messages/count_tokens"
+    # Preserve query string so e.g. /v1/messages?beta=true keeps `?beta=true`.
+    path_qs = request.path_qs
 
     try:
         body = await request.json()
@@ -233,9 +244,17 @@ async def messages_handler(request: web.Request) -> web.StreamResponse:
 
     forward_body = dict(body)
     forward_body["webhook_url"] = webhook_url
-    # The proxy doesn't stream. Drop the flag for the upstream call;
-    # we'll synthesize SSE on the response side if needed.
-    forward_body.pop("stream", None)
+
+    # IMPORTANT: keep `stream: true` if present. The upstream proxy needs to
+    # forward it to its own client.messages.create() call so Anthropic's
+    # "streaming required for long responses" guard is satisfied. The proxy
+    # is responsible for collecting the stream and POSTing the final result
+    # to our webhook.
+
+    # Strip fields known to break older Anthropic SDKs that some proxies use.
+    stripped = [f for f in BRIDGE_STRIP_FIELDS if forward_body.pop(f, None) is not None]
+    if stripped:
+        log.debug("Stripped fields from forwarded body: %s", stripped)
 
     headers = {
         "Authorization": f"Bearer {PROXY_AUTH_TOKEN}",
@@ -246,7 +265,7 @@ async def messages_handler(request: web.Request) -> web.StreamResponse:
         if h in request.headers:
             headers[h] = request.headers[h]
 
-    upstream_url = f"{PROXY_UPSTREAM_URL}{path}"
+    upstream_url = f"{PROXY_UPSTREAM_URL}{path_qs}"
     log.info("→ POST %s  stream=%s  callback=%s", upstream_url, is_streaming, callback_token)
 
     started_at = time.monotonic()
@@ -309,6 +328,22 @@ async def messages_handler(request: web.Request) -> web.StreamResponse:
             )
 
         log.info("← webhook (%.2fs total)  callback=%s", time.monotonic() - started_at, callback_token)
+
+        # Surface proxy-side error payloads as Anthropic-shaped errors so the
+        # CLI shows the real cause instead of a generic "missing content" line.
+        if isinstance(webhook_payload, dict) and webhook_payload.get("status") == "error":
+            proxy_msg = webhook_payload.get("message") or webhook_payload.get("error") or str(webhook_payload)
+            log.error("Proxy returned error via webhook  callback=%s  message=%s", callback_token, proxy_msg)
+            return web.json_response(
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "api_error",
+                        "message": f"Upstream proxy error: {proxy_msg}",
+                    },
+                },
+                status=502,
+            )
 
         anthropic_response = _unwrap_response(webhook_payload)
         if not isinstance(anthropic_response, dict) or "content" not in anthropic_response:
@@ -387,11 +422,21 @@ async def health_handler(request: web.Request) -> web.Response:
     })
 
 
+async def root_probe_handler(request: web.Request) -> web.Response:
+    """
+    Respond 200 to the bundled CLI's HEAD/GET probes against the API root.
+    Some Anthropic-compatible clients HEAD `/` to confirm the endpoint is alive.
+    """
+    return web.Response(status=200, text="bridge ok")
+
+
 def make_fake_app() -> web.Application:
     app = web.Application(client_max_size=128 * 1024 * 1024)  # 128 MiB — large PDFs as document blocks
     app.router.add_post("/v1/messages", messages_handler)
     app.router.add_post("/v1/messages/count_tokens", messages_handler)
     app.router.add_get("/health", health_handler)
+    app.router.add_route("HEAD", "/", root_probe_handler)
+    app.router.add_get("/", root_probe_handler)
     return app
 
 
