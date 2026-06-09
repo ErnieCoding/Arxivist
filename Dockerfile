@@ -19,8 +19,12 @@ COPY . .
 # named volumes from them on first run.
 RUN mkdir -p downloads .claude/skills uploads dashboards
 
-# The app listens on this port inside the container.
-# docker-compose maps it to 127.0.0.1:5050 on the host.
-EXPOSE 5050
+# Make entrypoint executable (COPY preserves bits but be explicit for cross-host clones).
+RUN chmod +x /app/entrypoint.sh
 
-ENTRYPOINT ["gunicorn", "--config", "gunicorn.conf.py", "app:app"]
+# 5050 = gunicorn (Flask app). 9998 = bridge webhook receiver.
+EXPOSE 5050
+EXPOSE 9998
+
+# entrypoint.sh starts the proxy bridge in the background, then gunicorn.
+ENTRYPOINT ["/app/entrypoint.sh"]
