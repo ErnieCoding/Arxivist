@@ -346,6 +346,40 @@ async def messages_handler(request: web.Request) -> web.StreamResponse:
             )
 
         anthropic_response = _unwrap_response(webhook_payload)
+
+        # Detect a common proxy bug: serializing the Anthropic SDK response with
+        # str() instead of .model_dump(). The payload contains a Python repr
+        # string instead of a JSON dict.
+        if isinstance(webhook_payload, dict):
+            raw_response = webhook_payload.get("response")
+            if isinstance(raw_response, str) and (
+                raw_response.startswith("<anthropic.")
+                or raw_response.startswith("Message(")
+                or raw_response.startswith("RawMessage(")
+            ):
+                log.error(
+                    "Proxy serialization bug  callback=%s  response_field=%r — "
+                    "the proxy is calling str() on the Anthropic SDK object instead "
+                    "of .model_dump(). Ask the proxy operator to fix.",
+                    callback_token, raw_response[:200],
+                )
+                return web.json_response(
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "api_error",
+                            "message": (
+                                "Upstream proxy serialization bug: the proxy stringified "
+                                "the Anthropic response object instead of converting it to "
+                                "JSON. The proxy operator must fix this — call "
+                                ".model_dump() (or iterate the stream first) before "
+                                "building the webhook payload."
+                            ),
+                        },
+                    },
+                    status=502,
+                )
+
         if not isinstance(anthropic_response, dict) or "content" not in anthropic_response:
             log.error("Webhook payload not in Anthropic shape  callback=%s  payload=%s",
                       callback_token, str(webhook_payload)[:500])
