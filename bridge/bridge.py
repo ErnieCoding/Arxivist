@@ -435,7 +435,8 @@ def make_fake_app() -> web.Application:
     app.router.add_post("/v1/messages", messages_handler)
     app.router.add_post("/v1/messages/count_tokens", messages_handler)
     app.router.add_get("/health", health_handler)
-    app.router.add_route("HEAD", "/", root_probe_handler)
+    # add_get registers both GET and HEAD for the same path, which covers
+    # the bundled CLI's `HEAD /` probe.
     app.router.add_get("/", root_probe_handler)
     return app
 
