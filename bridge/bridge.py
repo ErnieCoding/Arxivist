@@ -208,101 +208,119 @@ async def _collect_sse_to_message(upstream_resp) -> Optional[dict]:
     """
     Read Anthropic-style SSE events from `upstream_resp` and assemble them
     into a single Message dict (for clients that requested stream:false).
+
+    Reads the full body before parsing. For non-streaming clients we'd be
+    waiting for completion anyway, so streaming the parse buys nothing and
+    makes line-ending edge cases harder to handle.
     """
+    raw_bytes = await upstream_resp.read()
+    text = raw_bytes.decode("utf-8", errors="replace")
+    # Normalize line endings: some servers emit \r\n\r\n separators, which
+    # don't contain the bytes \n\n. Collapse to \n so the split below works.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    if not text.strip():
+        log.warning("SSE body was empty  bytes=%d", len(raw_bytes))
+        return None
+
+    events_raw = text.split("\n\n")
+
     message: Optional[dict] = None
     blocks_by_idx: dict[int, dict] = {}
     ordered_indices: list[int] = []
+    saw_any_known_event = False
 
-    buf = b""
-    async for chunk in upstream_resp.content.iter_any():
-        if not chunk:
+    for event_text in events_raw:
+        ev = _parse_sse_event(event_text)
+        if not ev:
             continue
-        buf += chunk
-        # SSE events are separated by a blank line — i.e. \n\n
-        while b"\n\n" in buf:
-            raw, buf = buf.split(b"\n\n", 1)
-            ev = _parse_sse_event(raw.decode("utf-8", errors="replace"))
-            if not ev:
+        t = ev.get("type")
+
+        if t == "message_start":
+            saw_any_known_event = True
+            msg = ev.get("message", {}) or {}
+            message = dict(msg)
+            message["content"] = []
+
+        elif t == "content_block_start":
+            saw_any_known_event = True
+            idx = ev.get("index", 0)
+            block = dict(ev.get("content_block", {}) or {})
+            if block.get("type") == "text" and "text" not in block:
+                block["text"] = ""
+            if block.get("type") == "tool_use":
+                block["_input_json"] = ""
+            blocks_by_idx[idx] = block
+            if idx not in ordered_indices:
+                ordered_indices.append(idx)
+
+        elif t == "content_block_delta":
+            saw_any_known_event = True
+            idx = ev.get("index", 0)
+            block = blocks_by_idx.get(idx)
+            if not block:
                 continue
-            t = ev.get("type")
+            delta = ev.get("delta", {}) or {}
+            d_type = delta.get("type")
+            if d_type == "text_delta":
+                block["text"] = block.get("text", "") + delta.get("text", "")
+            elif d_type == "input_json_delta":
+                block["_input_json"] = block.get("_input_json", "") + delta.get("partial_json", "")
+            elif d_type == "thinking_delta":
+                block["thinking"] = block.get("thinking", "") + delta.get("thinking", "")
+            elif d_type == "signature_delta":
+                block["signature"] = block.get("signature", "") + delta.get("signature", "")
 
-            if t == "message_start":
-                msg = ev.get("message", {}) or {}
-                message = dict(msg)
-                message["content"] = []
+        elif t == "content_block_stop":
+            saw_any_known_event = True
+            idx = ev.get("index", 0)
+            block = blocks_by_idx.get(idx)
+            if not block:
+                continue
+            if block.get("type") == "tool_use":
+                raw_json = block.pop("_input_json", "") or ""
+                try:
+                    block["input"] = json.loads(raw_json) if raw_json.strip() else {}
+                except json.JSONDecodeError:
+                    log.warning("Tool use input JSON malformed: %r", raw_json[:200])
+                    block["input"] = {}
 
-            elif t == "content_block_start":
-                idx = ev.get("index", 0)
-                block = dict(ev.get("content_block", {}) or {})
-                if block.get("type") == "text" and "text" not in block:
-                    block["text"] = ""
-                if block.get("type") == "tool_use":
-                    block["_input_json"] = ""
-                blocks_by_idx[idx] = block
-                if idx not in ordered_indices:
-                    ordered_indices.append(idx)
+        elif t == "message_delta":
+            saw_any_known_event = True
+            if message is None:
+                continue
+            delta = ev.get("delta", {}) or {}
+            if "stop_reason" in delta:
+                message["stop_reason"] = delta["stop_reason"]
+            if "stop_sequence" in delta:
+                message["stop_sequence"] = delta["stop_sequence"]
+            if "usage" in ev:
+                message["usage"] = ev["usage"]
 
-            elif t == "content_block_delta":
-                idx = ev.get("index", 0)
-                block = blocks_by_idx.get(idx)
-                if not block:
-                    continue
-                delta = ev.get("delta", {}) or {}
-                d_type = delta.get("type")
-                if d_type == "text_delta":
-                    block["text"] = block.get("text", "") + delta.get("text", "")
-                elif d_type == "input_json_delta":
-                    block["_input_json"] = block.get("_input_json", "") + delta.get("partial_json", "")
-                elif d_type == "thinking_delta":
-                    block["thinking"] = block.get("thinking", "") + delta.get("thinking", "")
-                elif d_type == "signature_delta":
-                    block["signature"] = block.get("signature", "") + delta.get("signature", "")
+        elif t == "message_stop":
+            saw_any_known_event = True
+            break
 
-            elif t == "content_block_stop":
-                idx = ev.get("index", 0)
-                block = blocks_by_idx.get(idx)
-                if not block:
-                    continue
-                # Finalize tool_use input by parsing the accumulated partial_json
-                if block.get("type") == "tool_use":
-                    raw_json = block.pop("_input_json", "") or ""
-                    try:
-                        block["input"] = json.loads(raw_json) if raw_json.strip() else {}
-                    except json.JSONDecodeError:
-                        log.warning("Tool use input JSON malformed: %r", raw_json[:200])
-                        block["input"] = {}
+        elif t == "_done_sentinel":
+            break
 
-            elif t == "message_delta":
-                if message is None:
-                    continue
-                delta = ev.get("delta", {}) or {}
-                if "stop_reason" in delta:
-                    message["stop_reason"] = delta["stop_reason"]
-                if "stop_sequence" in delta:
-                    message["stop_sequence"] = delta["stop_sequence"]
-                if "usage" in ev:
-                    message["usage"] = ev["usage"]
-
-            elif t == "message_stop":
-                # Stream complete
-                break
-
-            elif t == "_done_sentinel":
-                break
-
-            elif t in ("ping", "error"):
-                if t == "error":
-                    log.error("Upstream SSE error event: %s", ev)
-                    return None
-
-        else:
-            # No more complete events in the buffer; loop for more chunks
+        elif t == "ping":
             continue
-        # Inner while broke (message_stop / sentinel / error) — stop reading
-        break
+
+        elif t == "error":
+            log.error("Upstream SSE error event: %s", ev)
+            return None
 
     if message is None:
+        if saw_any_known_event:
+            log.warning("Got SSE events but no message_start  raw=%r", text[:500])
+        else:
+            log.warning(
+                "SSE body had no recognizable events  bytes=%d  preview=%r",
+                len(raw_bytes), text[:500],
+            )
         return None
+
     message["content"] = [blocks_by_idx[i] for i in ordered_indices if i in blocks_by_idx]
     return message
 
