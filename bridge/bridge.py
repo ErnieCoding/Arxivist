@@ -54,7 +54,7 @@ import time
 import uuid
 from typing import Optional
 
-from aiohttp import web, ClientSession, ClientTimeout, ClientResponseError
+from aiohttp import web, ClientSession, ClientTimeout
 
 log = logging.getLogger("bridge")
 
@@ -368,10 +368,17 @@ async def messages_handler(request: web.Request) -> web.StreamResponse:
     if stripped:
         log.debug("Stripped fields from forwarded body: %s", stripped)
 
+    # Always request streaming from the upstream proxy. Its GET stream URL is
+    # set up for tasks created with stream=true; non-streaming tasks return
+    # an empty/non-SSE body that we can't parse. If the original client asked
+    # for non-streaming, we'll collect the SSE events back into a single
+    # Message dict on our side before responding.
+    forward_body["stream"] = True
+
     upstream_url = f"{PROXY_UPSTREAM_URL}{path_qs}"
     base_headers = _proxy_headers(request)
 
-    log.info("→ POST %s  stream=%s", upstream_url, is_streaming)
+    log.info("→ POST %s  client_stream=%s (forcing upstream stream=True)", upstream_url, is_streaming)
     started_at = time.monotonic()
 
     # One session covers BOTH the enqueue POST and the SSE GET. The total
@@ -447,7 +454,24 @@ async def messages_handler(request: web.Request) -> web.StreamResponse:
                 status=502,
             )
 
+        # Defensive: if the proxy returns JSON directly (not SSE), parse it
+        # and return without trying to consume an event stream.
+        upstream_ct = stream_resp.headers.get("Content-Type", "").lower()
         try:
+            if "application/json" in upstream_ct:
+                log.info("Stream GET returned JSON (not SSE) for task_id=%s", task_id)
+                upstream_json = await stream_resp.json()
+                anthropic_response = _unwrap_response(upstream_json)
+                if not isinstance(anthropic_response, dict) or "content" not in anthropic_response:
+                    log.error("Stream GET JSON not in Anthropic shape  task_id=%s  payload=%s",
+                              task_id, str(upstream_json)[:300])
+                    return web.json_response(
+                        {"type": "error", "error": {"type": "api_error",
+                         "message": "Stream endpoint returned JSON but not an Anthropic Message"}},
+                        status=502,
+                    )
+                return _build_response(anthropic_response, is_streaming)
+
             return await _pipe_or_collect(stream_resp, request, is_streaming, task_id=task_id, started_at=started_at)
         finally:
             if not stream_resp.closed:
