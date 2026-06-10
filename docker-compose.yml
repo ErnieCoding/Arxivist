@@ -4,16 +4,15 @@ services:
     container_name: arxivist
     restart: unless-stopped
 
-    # Bind ONLY to localhost so the ports are not exposed to the internet.
-    # nginx on the host proxies:
-    #   /arxivist/          → 127.0.0.1:5050   (Flask app)
-    #   /arxivist/_webhook/ → 127.0.0.1:5051   (bridge webhook receiver)
+    # Bind ONLY to localhost so the port is not exposed to the internet.
+    # nginx on the host proxies /arxivist/ → 127.0.0.1:5050 (Flask app).
+    # The bridge runs in-container on 127.0.0.1:9999; nothing outside the
+    # container needs to reach it.
     ports:
       - "127.0.0.1:5050:5050"
-      - "127.0.0.1:5051:9998"
 
     # .env in the project root supplies secrets (ANTHROPIC_AUTH_TOKEN,
-    # PROXY_AUTH_TOKEN, etc.). Docker reads this file and injects the values.
+    # PROXY_AUTH_TOKEN, PROXY_STREAM_URL_TEMPLATE, etc.).
     env_file:
       - .env
 
@@ -23,7 +22,7 @@ services:
       # The Anthropic SDK + bundled CLI both point at the local bridge.
       - ANTHROPIC_BASE_URL=http://127.0.0.1:9999
       # Bridge config — points it at the real upstream proxy.
-      # PROXY_UPSTREAM_URL, PROXY_AUTH_TOKEN, BRIDGE_WEBHOOK_PUBLIC_URL come from .env.
+      # PROXY_UPSTREAM_URL, PROXY_AUTH_TOKEN, PROXY_STREAM_URL_TEMPLATE come from .env.
 
     volumes:
       # Bind-mount everything to the project tree so contents are visible on the

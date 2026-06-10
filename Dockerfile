@@ -22,9 +22,10 @@ RUN mkdir -p downloads .claude/skills uploads dashboards
 # Make entrypoint executable (COPY preserves bits but be explicit for cross-host clones).
 RUN chmod +x /app/entrypoint.sh
 
-# 5050 = gunicorn (Flask app). 9998 = bridge webhook receiver.
+# Only gunicorn is exposed externally. The proxy bridge runs on the loopback
+# interface (127.0.0.1:9999) inside the container; nothing outside needs to
+# reach it directly.
 EXPOSE 5050
-EXPOSE 9998
 
 # entrypoint.sh starts the proxy bridge in the background, then gunicorn.
 ENTRYPOINT ["/app/entrypoint.sh"]
