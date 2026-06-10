@@ -204,125 +204,104 @@ def _parse_sse_event(event_text: str) -> Optional[dict]:
         return None
 
 
-async def _collect_sse_to_message(upstream_resp) -> Optional[dict]:
+def _detect_sse_format(events: list[str]) -> str:
     """
-    Read Anthropic-style SSE events from `upstream_resp` and assemble them
-    into a single Message dict (for clients that requested stream:false).
-
-    Reads the full body before parsing. For non-streaming clients we'd be
-    waiting for completion anyway, so streaming the parse buys nothing and
-    makes line-ending edge cases harder to handle.
+    Decide whether an SSE stream is canonical Anthropic events or the
+    custom envelope the upstream proxy emits.
+    Returns "anthropic", "proxy", or "unknown".
     """
-    raw_bytes = await upstream_resp.read()
-    text = raw_bytes.decode("utf-8", errors="replace")
-    # Normalize line endings: some servers emit \r\n\r\n separators, which
-    # don't contain the bytes \n\n. Collapse to \n so the split below works.
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-
-    if not text.strip():
-        log.warning("SSE body was empty  bytes=%d", len(raw_bytes))
-        return None
-
-    events_raw = text.split("\n\n")
-
-    message: Optional[dict] = None
-    blocks_by_idx: dict[int, dict] = {}
-    ordered_indices: list[int] = []
-    saw_any_known_event = False
-
-    for event_text in events_raw:
-        ev = _parse_sse_event(event_text)
+    for ev_text in events[:6]:
+        ev = _parse_sse_event(ev_text)
         if not ev:
             continue
-        t = ev.get("type")
+        if ev.get("type") in (
+            "message_start", "message_delta", "message_stop", "ping",
+            "content_block_start", "content_block_delta", "content_block_stop",
+        ):
+            return "anthropic"
+        if "status" in ev and ("delta" in ev or "response" in ev):
+            return "proxy"
+    return "unknown"
 
-        if t == "message_start":
-            saw_any_known_event = True
-            msg = ev.get("message", {}) or {}
-            message = dict(msg)
-            message["content"] = []
 
-        elif t == "content_block_start":
-            saw_any_known_event = True
-            idx = ev.get("index", 0)
-            block = dict(ev.get("content_block", {}) or {})
-            if block.get("type") == "text" and "text" not in block:
-                block["text"] = ""
-            if block.get("type") == "tool_use":
-                block["_input_json"] = ""
-            blocks_by_idx[idx] = block
-            if idx not in ordered_indices:
-                ordered_indices.append(idx)
+def _proxy_events_to_message(events: list[str]) -> Optional[dict]:
+    """
+    Translate the upstream proxy's wrapper format into an Anthropic Message
+    dict. The proxy emits:
+        data: {"status":"stream", "task_id":"...", "delta":"<chunk>"}
+        ... (one per chunk)
+        data: {"status":"done", "task_id":"...", "response":"<full>", "usage":{...}}
+    Only the text content survives this format — the proxy strips
+    tool_use blocks, content-block structure, role, stop_reason, etc.
+    For text-only assistant turns this is enough to keep the agent loop
+    moving. Anything that requires tool_use will fail at the agent level
+    even when this translator runs cleanly.
+    """
+    streamed = ""
+    final_text = None
+    usage = None
+    task_id = None
+    looks_like_json = False
+    proxy_error = None
 
-        elif t == "content_block_delta":
-            saw_any_known_event = True
-            idx = ev.get("index", 0)
-            block = blocks_by_idx.get(idx)
-            if not block:
-                continue
-            delta = ev.get("delta", {}) or {}
-            d_type = delta.get("type")
-            if d_type == "text_delta":
-                block["text"] = block.get("text", "") + delta.get("text", "")
-            elif d_type == "input_json_delta":
-                block["_input_json"] = block.get("_input_json", "") + delta.get("partial_json", "")
-            elif d_type == "thinking_delta":
-                block["thinking"] = block.get("thinking", "") + delta.get("thinking", "")
-            elif d_type == "signature_delta":
-                block["signature"] = block.get("signature", "") + delta.get("signature", "")
-
-        elif t == "content_block_stop":
-            saw_any_known_event = True
-            idx = ev.get("index", 0)
-            block = blocks_by_idx.get(idx)
-            if not block:
-                continue
-            if block.get("type") == "tool_use":
-                raw_json = block.pop("_input_json", "") or ""
-                try:
-                    block["input"] = json.loads(raw_json) if raw_json.strip() else {}
-                except json.JSONDecodeError:
-                    log.warning("Tool use input JSON malformed: %r", raw_json[:200])
-                    block["input"] = {}
-
-        elif t == "message_delta":
-            saw_any_known_event = True
-            if message is None:
-                continue
-            delta = ev.get("delta", {}) or {}
-            if "stop_reason" in delta:
-                message["stop_reason"] = delta["stop_reason"]
-            if "stop_sequence" in delta:
-                message["stop_sequence"] = delta["stop_sequence"]
-            if "usage" in ev:
-                message["usage"] = ev["usage"]
-
-        elif t == "message_stop":
-            saw_any_known_event = True
-            break
-
-        elif t == "_done_sentinel":
-            break
-
-        elif t == "ping":
+    for ev_text in events:
+        ev = _parse_sse_event(ev_text)
+        if not ev:
             continue
+        status = ev.get("status")
+        task_id = ev.get("task_id") or task_id
 
-        elif t == "error":
-            log.error("Upstream SSE error event: %s", ev)
-            return None
+        if status == "stream":
+            delta = ev.get("delta", "")
+            if isinstance(delta, str):
+                streamed += delta
+                if streamed and streamed[0] in "{[":
+                    looks_like_json = True
 
-    if message is None:
-        if saw_any_known_event:
-            log.warning("Got SSE events but no message_start  raw=%r", text[:500])
-        else:
-            log.warning(
-                "SSE body had no recognizable events  bytes=%d  preview=%r",
-                len(raw_bytes), text[:500],
-            )
+        elif status == "done":
+            resp = ev.get("response")
+            if isinstance(resp, dict):
+                # If the proxy ever fixes serialization to send a real Message,
+                # accept it transparently.
+                if "content" in resp:
+                    return _unwrap_response(resp)
+                final_text = json.dumps(resp, ensure_ascii=False)
+                looks_like_json = True
+            elif isinstance(resp, str):
+                final_text = resp
+                if final_text and final_text.lstrip()[:1] in "{[":
+                    looks_like_json = True
+            usage = ev.get("usage") or usage
+
+        elif status == "error":
+            proxy_error = ev.get("message") or str(ev)
+
+    if proxy_error:
+        log.error("Proxy reported error in stream: %s", proxy_error)
         return None
 
-    message["content"] = [blocks_by_idx[i] for i in ordered_indices if i in blocks_by_idx]
-    return message
+    body = final_text if final_text is not None else streamed
+    if not body:
+        return None
+
+    if looks_like_json:
+        log.warning(
+            "Proxy delivered a JSON-shaped response (likely a tool_use whose "
+            "structure the proxy stripped). The agent will not be able to "
+            "invoke the tool because the name/id are lost. Returning as text. "
+            "Sample: %r", body[:200],
+        )
+
+    return {
+        "id": f"msg_{(task_id or uuid.uuid4().hex)[:24]}",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4",
+        "content": [{"type": "text", "text": body}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": usage or {},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -500,52 +479,154 @@ async def _pipe_or_collect(upstream_resp, client_request: web.Request,
                            is_streaming: bool, *, task_id: str | None = None,
                            started_at: float | None = None) -> web.StreamResponse:
     """
-    With stream:true → pipe SSE chunks straight through to the client.
-    With stream:false → accumulate events into a single Message dict and
-                        return it as JSON.
+    Read the upstream SSE body, detect its format (canonical Anthropic vs
+    the proxy's wrapper envelope), and either:
+      - For canonical Anthropic + client_stream=True: pipe bytes through.
+      - For everything else: assemble into a Message dict and return it
+        either as JSON (client_stream=False) or as synthesized SSE
+        (client_stream=True). For the proxy's format, this is the only
+        path that produces output the CLI can actually parse — piping the
+        wrapper bytes verbatim would deliver gibberish.
+
+    Buffering the upstream body costs the user's first-token latency
+    (small in practice since the upstream is fast), but it's the only
+    safe path while the proxy doesn't preserve Anthropic structure.
     """
-    if is_streaming:
-        client_resp = web.StreamResponse(
-            status=200,
-            headers={
-                "Content-Type": "text/event-stream; charset=utf-8",
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-            },
-        )
-        await client_resp.prepare(client_request)
+    raw_bytes = await upstream_resp.read()
+    text = raw_bytes.decode("utf-8", errors="replace")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    events_raw = [e for e in text.split("\n\n") if e.strip()]
+    fmt = _detect_sse_format(events_raw)
 
-        total_bytes = 0
-        try:
-            async for chunk in upstream_resp.content.iter_any():
-                if not chunk:
-                    continue
-                total_bytes += len(chunk)
-                await client_resp.write(chunk)
-        except ConnectionResetError:
-            log.info("client dropped connection while streaming  task_id=%s", task_id)
-        except Exception:
-            log.exception("Error while piping SSE  task_id=%s", task_id)
-            raise
-        await client_resp.write_eof()
-        if started_at is not None:
-            log.info("← streamed %d bytes (%.2fs total)  task_id=%s",
-                     total_bytes, time.monotonic() - started_at, task_id)
-        return client_resp
-
-    # Non-streaming client: collect SSE → Message → JSON.
-    message = await _collect_sse_to_message(upstream_resp)
-    if message is None or "content" not in message:
-        log.error("Upstream SSE produced no Message  task_id=%s", task_id)
-        return web.json_response(
-            {"type": "error", "error": {"type": "api_error",
-             "message": "Upstream stream did not produce a complete Message"}},
-            status=502,
-        )
     if started_at is not None:
-        log.info("← assembled Message (%.2fs total)  task_id=%s  content_blocks=%d",
-                 time.monotonic() - started_at, task_id, len(message.get("content", [])))
-    return web.json_response(message)
+        log.info("← upstream complete  task_id=%s  fmt=%s  bytes=%d  (%.2fs total)",
+                 task_id, fmt, len(raw_bytes), time.monotonic() - started_at)
+
+    if fmt == "anthropic":
+        # Canonical Anthropic SSE. For streaming clients, just send the
+        # bytes back (already in the right format). For non-streaming
+        # clients, parse and assemble.
+        if is_streaming:
+            client_resp = web.StreamResponse(
+                status=200,
+                headers={
+                    "Content-Type": "text/event-stream; charset=utf-8",
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                },
+            )
+            await client_resp.prepare(client_request)
+            try:
+                await client_resp.write(raw_bytes)
+            except ConnectionResetError:
+                log.info("client dropped connection while streaming  task_id=%s", task_id)
+            await client_resp.write_eof()
+            return client_resp
+
+        message = _collect_anthropic_events(events_raw)
+        if not message or "content" not in message:
+            return web.json_response(
+                {"type": "error", "error": {"type": "api_error",
+                 "message": "Anthropic SSE did not produce a complete Message"}},
+                status=502,
+            )
+        return web.json_response(message)
+
+    if fmt == "proxy":
+        # Proxy wrapper format. Translate to Anthropic Message and return.
+        message = _proxy_events_to_message(events_raw)
+        if not message or "content" not in message:
+            log.error("Proxy SSE produced no Message  task_id=%s", task_id)
+            return web.json_response(
+                {"type": "error", "error": {"type": "api_error",
+                 "message": "Upstream stream did not produce a complete Message"}},
+                status=502,
+            )
+        return _build_response(message, is_streaming)
+
+    # Unknown format.
+    log.error("Unrecognized upstream SSE format  task_id=%s  preview=%r",
+              task_id, text[:500])
+    return web.json_response(
+        {"type": "error", "error": {"type": "api_error",
+         "message": "Bridge could not recognize the upstream stream format"}},
+        status=502,
+    )
+
+
+def _collect_anthropic_events(events_raw: list[str]) -> Optional[dict]:
+    """
+    Assemble canonical Anthropic SSE events into a Message dict.
+    Pulled out of the previous _collect_sse_to_message so the format
+    detector can dispatch to it directly.
+    """
+    message: Optional[dict] = None
+    blocks_by_idx: dict[int, dict] = {}
+    ordered_indices: list[int] = []
+
+    for event_text in events_raw:
+        ev = _parse_sse_event(event_text)
+        if not ev:
+            continue
+        t = ev.get("type")
+
+        if t == "message_start":
+            msg = ev.get("message", {}) or {}
+            message = dict(msg)
+            message["content"] = []
+        elif t == "content_block_start":
+            idx = ev.get("index", 0)
+            block = dict(ev.get("content_block", {}) or {})
+            if block.get("type") == "text" and "text" not in block:
+                block["text"] = ""
+            if block.get("type") == "tool_use":
+                block["_input_json"] = ""
+            blocks_by_idx[idx] = block
+            if idx not in ordered_indices:
+                ordered_indices.append(idx)
+        elif t == "content_block_delta":
+            idx = ev.get("index", 0)
+            block = blocks_by_idx.get(idx)
+            if not block:
+                continue
+            delta = ev.get("delta", {}) or {}
+            d_type = delta.get("type")
+            if d_type == "text_delta":
+                block["text"] = block.get("text", "") + delta.get("text", "")
+            elif d_type == "input_json_delta":
+                block["_input_json"] = block.get("_input_json", "") + delta.get("partial_json", "")
+            elif d_type == "thinking_delta":
+                block["thinking"] = block.get("thinking", "") + delta.get("thinking", "")
+            elif d_type == "signature_delta":
+                block["signature"] = block.get("signature", "") + delta.get("signature", "")
+        elif t == "content_block_stop":
+            idx = ev.get("index", 0)
+            block = blocks_by_idx.get(idx)
+            if not block:
+                continue
+            if block.get("type") == "tool_use":
+                raw_json = block.pop("_input_json", "") or ""
+                try:
+                    block["input"] = json.loads(raw_json) if raw_json.strip() else {}
+                except json.JSONDecodeError:
+                    block["input"] = {}
+        elif t == "message_delta":
+            if message is None:
+                continue
+            delta = ev.get("delta", {}) or {}
+            if "stop_reason" in delta:
+                message["stop_reason"] = delta["stop_reason"]
+            if "stop_sequence" in delta:
+                message["stop_sequence"] = delta["stop_sequence"]
+            if "usage" in ev:
+                message["usage"] = ev["usage"]
+        elif t == "message_stop":
+            break
+
+    if message is None:
+        return None
+    message["content"] = [blocks_by_idx[i] for i in ordered_indices if i in blocks_by_idx]
+    return message
 
 
 def _build_response(anthropic_response: dict, is_streaming: bool) -> web.StreamResponse:
