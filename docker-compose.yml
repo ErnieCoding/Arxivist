@@ -33,6 +33,8 @@ services:
       - ./.claude/skills:/app/.claude/skills
       - ./uploads:/app/uploads
       - ./dashboards:/app/dashboards
+      # Persists bridge mode preference (direct/proxy) across container restarts.
+      - ./config:/app/config
 
     logging:
       driver: "json-file"

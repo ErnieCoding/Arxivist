@@ -8,7 +8,7 @@ workers = 2
 worker_class = "sync"
 
 # Agent requests can take several minutes (LLM + multiple tool calls).
-timeout = 300
+timeout = 600
 graceful_timeout = 30
 keepalive = 5
 

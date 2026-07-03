@@ -476,6 +476,77 @@
             font-family: monospace;
             color: #8b9cf7;
         }
+
+        /* Proxy/Direct mode toggle */
+        .mode-toggle {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 0.45rem;
+            font-size: 0.75rem;
+            color: #666;
+            user-select: none;
+        }
+
+        .mode-toggle .mode-label {
+            transition: color 0.2s;
+        }
+
+        .mode-toggle .mode-label.active {
+            color: #8b9cf7;
+            font-weight: 600;
+        }
+
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 36px;
+            height: 20px;
+        }
+
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: #2a2d3a;
+            border: 1px solid #444;
+            border-radius: 20px;
+            transition: background 0.2s, border-color 0.2s;
+        }
+
+        .toggle-slider::before {
+            content: '';
+            position: absolute;
+            height: 14px;
+            width: 14px;
+            left: 2px;
+            bottom: 2px;
+            background: #666;
+            border-radius: 50%;
+            transition: transform 0.2s, background 0.2s;
+        }
+
+        .toggle-switch input:checked + .toggle-slider {
+            background: #1e2540;
+            border-color: #5b6ef5;
+        }
+
+        .toggle-switch input:checked + .toggle-slider::before {
+            transform: translateX(16px);
+            background: #8b9cf7;
+        }
+
+        .mode-toggle[data-unavailable="proxy"] .mode-label-proxy,
+        .mode-toggle[data-unavailable="direct"] .mode-label-direct {
+            opacity: 0.35;
+            text-decoration: line-through;
+        }
     </style>
 </head>
 <body>
@@ -484,6 +555,14 @@
         <header class="app-header">
             <h1>Arxivist</h1>
             <span class="subtitle">AI research assistant — search, summarize, build dashboards</span>
+            <div class="mode-toggle" id="modeToggle" title="Switch between direct Anthropic API and upstream proxy">
+                <span class="mode-label mode-label-direct" id="modeLabelDirect">Direct</span>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="modeCheckbox">
+                    <span class="toggle-slider"></span>
+                </label>
+                <span class="mode-label mode-label-proxy" id="modeLabelProxy">Proxy</span>
+            </div>
         </header>
 
         <!-- Main -->
@@ -928,6 +1007,54 @@
             document.body.style.cursor = '';
             document.body.style.userSelect = '';
         });
+
+        // ===== Proxy / Direct mode toggle =====
+
+        const modeToggle = document.getElementById('modeToggle');
+        const modeCheckbox = document.getElementById('modeCheckbox');
+        const modeLabelDirect = document.getElementById('modeLabelDirect');
+        const modeLabelProxy = document.getElementById('modeLabelProxy');
+
+        function applyModeUI(data) {
+            const isProxy = data.mode === 'proxy';
+            modeCheckbox.checked = isProxy;
+            modeLabelDirect.classList.toggle('active', !isProxy);
+            modeLabelProxy.classList.toggle('active', isProxy);
+            if (!data.proxy_available) modeToggle.dataset.unavailable = 'proxy';
+            else if (!data.direct_available) modeToggle.dataset.unavailable = 'direct';
+            else delete modeToggle.dataset.unavailable;
+        }
+
+        async function fetchMode() {
+            try {
+                const resp = await fetch(BASE + '/api/proxy-mode');
+                if (resp.ok) applyModeUI(await resp.json());
+            } catch (e) { /* bridge may not be running locally */ }
+        }
+
+        modeCheckbox.addEventListener('change', async () => {
+            const newMode = modeCheckbox.checked ? 'proxy' : 'direct';
+            try {
+                const resp = await fetch(BASE + '/api/proxy-mode', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mode: newMode }),
+                });
+                const data = await resp.json();
+                if (data.error) {
+                    // Revert checkbox on failure.
+                    modeCheckbox.checked = !modeCheckbox.checked;
+                    console.error('Mode switch failed:', data.error);
+                } else {
+                    applyModeUI(data);
+                }
+            } catch (e) {
+                modeCheckbox.checked = !modeCheckbox.checked;
+                console.error('Mode switch request failed:', e);
+            }
+        });
+
+        fetchMode();
 
         // ===== Initial load =====
         refreshFiles();

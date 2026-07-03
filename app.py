@@ -9,11 +9,14 @@ Pipeline per query:
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
 import sys
 import time
+import urllib.request
+import urllib.error
 
 # Fix Windows console encoding — agent SDK can emit emoji/unicode that
 # crashes cp1252. Force UTF-8 before any output happens.
@@ -31,12 +34,12 @@ from flask import Flask, render_template, request, jsonify, send_file, abort
 load_dotenv()
 
 from claude_agent_sdk import query, ClaudeAgentOptions
-from tools import arxiv_server, DOWNLOADS_DIR, reset_session, get_session
+from arxiv_tools import arxiv_server, DOWNLOADS_DIR, reset_session, get_session
 
-import sys as _sys
-_sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools"))
-from call_api import api_server
-from dashboard_tools import dashboard_server
+from tools.call_api import api_server
+from tools.dashboard_tools import dashboard_server
+from tools.kb_tools import kb_server
+from tools.hh_tools import hh_server
 
 import dashboards_store
 import uploads_store
@@ -165,7 +168,7 @@ def summarize_papers(session: dict, user_query: str) -> str:
 
     client = anthropic.Anthropic()
     response = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model=os.environ.get("SUMMARIZE_MODEL", "claude-sonnet-4-6"),
         max_tokens=8192,
         messages=[
             {
@@ -396,29 +399,43 @@ async def run_chat_agent(
 
     system_prompt = (
         "You are Arxivist, an intelligent research assistant with self-extending capabilities.\n\n"
-        "Before responding to any request, identify which skill applies by checking the description "
-        "of available skills. Skills are in .claude/skills/ and are loaded automatically.\n\n"
-        "Available skills:\n"
-        "- searching-arxiv: find and download papers from arXiv\n"
-        "- summarizing-papers: summarize downloaded papers\n"
-        "- reading-uploads: locate and read uploaded files by file_id\n"
-        "- creating-dashboards: build a single-file HTML dashboard from a document or text\n"
-        "- editing-dashboards: edit the active dashboard in place\n"
-        "- creating-skills: create new SKILL.md files for databases or APIs the user mentions\n"
-        "- plus any database/API skills previously created in .claude/skills/\n\n"
-        "When a user wants a dashboard / summary page / overview page from an upload, pasted text, "
-        "or downloaded paper, use creating-dashboards. When the user wants to change an existing "
-        "dashboard (and an Active dashboard UUID is set below), use editing-dashboards — do NOT "
-        "create a new dashboard.\n\n"
-        "When a user asks to store, add, index, or retrieve data from a database or external system:\n"
-        "  1. Run: ls .claude/skills/ to check for a matching skill.\n"
-        "  2. If found, read its SKILL.md and follow its workflow using api:call_api.\n"
-        "  3. If not found, use the creating-skills skill to create a SKILL.md for it, "
-        "then immediately use the new skill to complete the request.\n\n"
-        "When a user provides API details (base URL, endpoints, auth tokens), treat this as a "
-        "request to create or update a skill for that system — do it proactively.\n\n"
-        "Always complete the user's full request. If the request involves both finding papers AND "
-        "ingesting them into a database, do both steps without waiting for a second message.\n\n"
+        "## Native MCP tools (use directly — no SKILL.md needed):\n\n"
+        "Knowledge base — READ ONLY (neo.rndl.ru:5001, ArangoDB):\n"
+        "  mcp__kb__list_kb_databases        — list all databases\n"
+        "  mcp__kb__query_knowledge_base     — ask a natural language question (CALL THIS FIRST)\n"
+        "  mcp__kb__get_kb_task_status       — poll async task status\n"
+        "  NOTE: This KB does not support raw text ingestion via API. "
+        "Expansion requires server-side file access. Do not attempt to write data to it.\n\n"
+        "HeadHunter API (hh.ru):\n"
+        "  mcp__hh__search_hh_vacancies      — search job vacancies\n"
+        "  mcp__hh__get_hh_vacancy           — get full vacancy details\n"
+        "  mcp__hh__search_hh_employers      — find companies\n"
+        "  mcp__hh__get_hh_employer_details  — company profile + vacancies\n"
+        "  mcp__hh__get_hh_reference         — areas, roles, skills, dictionaries\n\n"
+        "arXiv:\n"
+        "  mcp__arxiv__search_arxiv, mcp__arxiv__download_paper, mcp__arxiv__list_downloads\n\n"
+        "Dashboard:\n"
+        "  mcp__dashboard__create_dashboard, mcp__dashboard__extract_text\n\n"
+        "Generic HTTP (for any other API):\n"
+        "  mcp__api__call_api\n\n"
+        "## Skills (loaded from .claude/skills/ — for orchestration and unknown APIs):\n"
+        "  - searching-arxiv, summarizing-papers — arXiv workflow\n"
+        "  - reading-uploads — read uploaded files\n"
+        "  - creating-dashboards, editing-dashboards — dashboard workflow\n"
+        "  - enriching-knowledge-base — web research → structure → KB ingestion workflow\n"
+        "  - creating-skills — write new SKILL.md for any API the user describes\n"
+        "  - (any skill previously created in .claude/skills/)\n\n"
+        "## Decision rules:\n\n"
+        "1. COMPANY / TOPIC QUERY: Call mcp__kb__query_knowledge_base FIRST. "
+        "Use database name matching the topic (try 'companies', or call list_kb_databases to discover). "
+        "If the KB has useful data → present it. "
+        "If KB returns nothing → tell the user what you found (or didn't find) and ASK if they want "
+        "you to search the web and enrich the KB. Do NOT start web search automatically.\n\n"
+        "2. HEADHUNTER: Use mcp__hh__* tools directly. No SKILL.md needed.\n\n"
+        "3. DASHBOARD: use creating-dashboards skill; if active dashboard exists, use editing-dashboards.\n\n"
+        "4. NEW / UNKNOWN API: If the user provides endpoint + auth details, use creating-skills to "
+        "write a SKILL.md, then immediately use mcp__api__call_api following that skill.\n\n"
+        "5. Complete the full request end-to-end without stopping halfway.\n\n"
         "----- SESSION CONTEXT -----\n"
         f"{context_block}\n"
         "---------------------------\n"
@@ -427,19 +444,40 @@ async def run_chat_agent(
     options = ClaudeAgentOptions(
         cwd=PROJECT_DIR,
         setting_sources=["user", "project"],
-        mcp_servers={"arxiv": arxiv_server, "api": api_server, "dashboard": dashboard_server},
+        mcp_servers={
+            "arxiv": arxiv_server,
+            "api": api_server,
+            "dashboard": dashboard_server,
+            "kb": kb_server,
+            "hh": hh_server,
+        },
         allowed_tools=[
             "Skill",
             "Read",
             "Write",
             "Edit",
             "Bash",
+            "WebSearch",
+            "WebFetch",
+            # arXiv
             "mcp__arxiv__search_arxiv",
             "mcp__arxiv__download_paper",
             "mcp__arxiv__list_downloads",
+            # Generic HTTP (for creating-skills and unknown APIs)
             "mcp__api__call_api",
+            # Dashboard
             "mcp__dashboard__create_dashboard",
             "mcp__dashboard__extract_text",
+            # Knowledge Base — read-only until server supports raw text ingestion
+            "mcp__kb__list_kb_databases",
+            "mcp__kb__query_knowledge_base",
+            "mcp__kb__get_kb_task_status",
+            # HeadHunter (deterministic typed tools)
+            "mcp__hh__search_hh_vacancies",
+            "mcp__hh__get_hh_vacancy",
+            "mcp__hh__search_hh_employers",
+            "mcp__hh__get_hh_employer_details",
+            "mcp__hh__get_hh_reference",
         ],
         max_turns=60,
         system_prompt=system_prompt,
@@ -637,6 +675,37 @@ def serve_dashboard(dashboard_uuid):
 def list_dashboards():
     """Return all registered dashboards for the sidebar (newest first)."""
     return jsonify({"dashboards": dashboards_store.list_all()})
+
+
+_BRIDGE_BASE = f"http://{os.environ.get('BRIDGE_FAKE_HOST', '127.0.0.1')}:{os.environ.get('BRIDGE_FAKE_PORT', '9999')}"
+
+
+@app.route("/api/proxy-mode", methods=["GET", "POST"])
+def proxy_mode():
+    """
+    GET  → returns {"mode": "direct"|"proxy", "proxy_available": bool, "direct_available": bool}
+    POST {"mode": "direct"|"proxy"} → switches the bridge mode, returns same shape
+    """
+    bridge_url = f"{_BRIDGE_BASE}/mode"
+    try:
+        if request.method == "POST":
+            data = request.get_json(force=True) or {}
+            payload = json.dumps({"mode": data.get("mode", "")}).encode("utf-8")
+            req = urllib.request.Request(
+                bridge_url, data=payload, method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+        else:
+            req = urllib.request.Request(bridge_url, method="GET")
+
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return jsonify(json.loads(resp.read()))
+
+    except urllib.error.HTTPError as e:
+        err = e.read().decode("utf-8", errors="replace")[:300]
+        return jsonify({"error": f"Bridge returned HTTP {e.code}: {err}"}), 502
+    except Exception as e:
+        return jsonify({"error": f"Bridge unreachable: {e}"}), 502
 
 
 if __name__ == "__main__":
