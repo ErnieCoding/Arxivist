@@ -1,13 +1,3 @@
-"""
-Flask web app that accepts natural language queries and uses the Claude Agent SDK
-to search arXiv, download papers, and then produces summaries via a direct API call.
-
-Pipeline per query:
-  1. Agent loop: parse query -> search_arxiv -> download_paper (per result)
-  2. Post-agent: direct anthropic API call to summarize using collected abstracts
-  3. Return summaries + list of files downloaded THIS query only
-"""
-
 import asyncio
 import json
 import logging
@@ -463,7 +453,8 @@ def _build_chat_options(session_id, active_dashboard_uuid, attached_files):
         "  mcp__hh__search_hh_employers      — find companies\n"
         "  mcp__hh__get_hh_employer_details  — company profile + vacancies\n"
         "  mcp__hh__get_hh_reference         — areas, roles, skills, dictionaries\n"
-        "  mcp__hh__search_hh_resumes        — search resumes/candidates (needs one-time sign-in)\n\n"
+        "  mcp__hh__search_hh_resumes        — search resumes/candidates (needs one-time sign-in)\n"
+        "  mcp__hh__get_hh_resume            — full details of one resume by id\n\n"
         "arXiv:\n"
         "  mcp__arxiv__search_arxiv, mcp__arxiv__download_paper, mcp__arxiv__list_downloads\n\n"
         "Dashboard:\n"
@@ -486,6 +477,14 @@ def _build_chat_options(session_id, active_dashboard_uuid, attached_files):
         "2. HEADHUNTER: Use mcp__hh__* tools directly. No SKILL.md needed. If a tool reply starts "
         "with 'AUTHORIZATION_REQUIRED' or contains a sign-in link, present that link to the user as a "
         "clickable markdown link (in their language) and STOP — do not retry. It is a one-time login.\n\n"
+        "2a. CANDIDATES / RESUMES: search_hh_resumes returns a numbered list; present it cleanly with the "
+        "resume links and ASK which candidates to save (never save automatically). When the user picks some, "
+        "for each selected candidate: derive the resume_id from its URL (hh.ru/resume/<id>), optionally call "
+        "get_hh_resume to enrich, then save with add_document_to_kb into the 'candidates' database — one JSON "
+        "document per candidate that MUST include resume_url plus the profile fields (candidate role, area, "
+        "experience_years, key_skills, salary, education, source, saved_at). This keeps candidate and resume "
+        "together so later questions return both a summary and the resume link. Treat resumes as personal data: "
+        "save only what the user explicitly selected.\n\n"
         "3. DASHBOARD: use creating-dashboards skill; if active dashboard exists, use editing-dashboards.\n\n"
         "4. NEW / UNKNOWN API: If the user provides endpoint + auth details, use creating-skills to "
         "write a SKILL.md, then immediately use mcp__api__call_api following that skill.\n\n"
@@ -534,6 +533,7 @@ def _build_chat_options(session_id, active_dashboard_uuid, attached_files):
             "mcp__hh__get_hh_employer_details",
             "mcp__hh__get_hh_reference",
             "mcp__hh__search_hh_resumes",
+            "mcp__hh__get_hh_resume",
         ],
         max_turns=60,
         system_prompt=system_prompt,

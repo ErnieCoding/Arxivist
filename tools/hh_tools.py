@@ -539,15 +539,97 @@ async def search_hh_resumes(args: dict) -> dict:
     if not items:
         return {"content": [{"type": "text", "text": "Резюме по заданным критериям не найдены."}]}
 
-    lines = [f"Найдено резюме: {found} (показано {len(items)})\n"]
-    for r in items:
+    # Numbered list so the user can pick which candidates to save ("save #1, #3").
+    # Each entry carries the resume link (user-facing) — the agent can derive the
+    # resume_id from that URL later when saving to the knowledge base.
+    lines = [f"Найдено резюме: {found} (показано {len(items)}).\n"]
+    for i, r in enumerate(items, 1):
         title = r.get("title", "—")
         area = (r.get("area") or {}).get("name", "?")
+        age = r.get("age")
         exp = (r.get("total_experience") or {}).get("months")
-        exp_str = f"{exp // 12} лет" if exp else "не указан"
-        lines.append(f"- {title} | {area} | опыт: {exp_str} | {r.get('alternate_url', '')}")
+        exp_str = f"{exp // 12} лет" if exp else "опыт не указан"
+        roles = ", ".join(pr.get("name", "") for pr in (r.get("professional_roles") or [])[:3])
+        url = r.get("alternate_url", "")
+        parts = [f"{i}. {title} — {area}, {exp_str}"]
+        if age:
+            parts.append(f"{age} лет")
+        if r.get("salary"):
+            parts.append(_salary_str(r.get("salary")))
+        line = " | ".join(parts)
+        if roles:
+            line += f"\n   Роли: {roles}"
+        line += f"\n   Резюме: {url}"
+        lines.append(line)
 
+    lines.append(
+        "\n[Present this to the user as a clean numbered list with the resume links. "
+        "Then offer to save selected candidates to the knowledge base. When the user picks some, "
+        "for each: optionally call get_hh_resume to enrich, then add_document_to_kb into the "
+        "'candidates' database with resume_url as a field. Do not save anything unless asked.]"
+    )
     return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+
+
+@tool(
+    "get_hh_resume",
+    (
+        "Fetch full details of a single HeadHunter resume by its resume_id (the ID at the end of a "
+        "resume URL like https://hh.ru/resume/<id>). Use this to enrich a candidate before saving to "
+        "the knowledge base. Requires a user token + paid CV-database access."
+    ),
+    {
+        "type": "object",
+        "properties": {
+            "resume_id": {
+                "type": "string",
+                "description": "Resume ID — the last path segment of the resume URL (hh.ru/resume/<id>).",
+            },
+        },
+        "required": ["resume_id"],
+    },
+)
+async def get_hh_resume(args: dict) -> dict:
+    rid = args["resume_id"]
+    result = _get(f"/resumes/{rid}")
+    if not result["ok"]:
+        link = _auth_link()
+        if "403" in str(result["error"]):
+            return {"content": [{"type": "text", "text": (
+                "Access to this resume is restricted (needs a signed-in employer account with a paid "
+                f"CV-database subscription). If not signed in yet, show: [Войти через HeadHunter]({link})."
+            )}]}
+        return {"content": [{"type": "text", "text": f"Failed to fetch resume {rid}: {result['error']}"}]}
+
+    r = result["data"]
+    area = (r.get("area") or {}).get("name", "?")
+    exp_months = (r.get("total_experience") or {}).get("months")
+    exp_years = f"{exp_months // 12} лет" if exp_months else "не указан"
+    skills = r.get("skill_set") or []
+    roles = ", ".join(pr.get("name", "") for pr in (r.get("professional_roles") or []))
+    education = r.get("education") or {}
+    edu_level = (education.get("level") or {}).get("name", "")
+    experience = r.get("experience") or []
+    exp_lines = []
+    for e in experience[:6]:
+        company = e.get("company", "?")
+        position = e.get("position", "?")
+        start = (e.get("start") or "")[:7]
+        end = (e.get("end") or "по наст. время")[:7] if e.get("end") else "по наст. время"
+        exp_lines.append(f"  • {position} — {company} ({start}–{end})")
+
+    out = [
+        f"Резюме: {r.get('title', '—')}",
+        f"Регион: {area} | Общий опыт: {exp_years}",
+        f"Зарплатные ожидания: {_salary_str(r.get('salary'))}",
+        f"Роли: {roles or 'не указаны'}",
+        f"Образование: {edu_level or 'не указано'}",
+        f"Ключевые навыки: {', '.join(skills) if skills else 'не указаны'}",
+        f"Ссылка: {r.get('alternate_url', '')}",
+    ]
+    if exp_lines:
+        out.append("Опыт работы:\n" + "\n".join(exp_lines))
+    return {"content": [{"type": "text", "text": "\n".join(out)}]}
 
 
 # ---------------------------------------------------------------------------
@@ -564,5 +646,6 @@ hh_server = create_sdk_mcp_server(
         get_hh_employer_details,
         get_hh_reference,
         search_hh_resumes,
+        get_hh_resume,
     ],
 )

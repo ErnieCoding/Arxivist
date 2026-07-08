@@ -17,6 +17,8 @@ description: Searches HeadHunter (hh.ru) for vacancies, employers, HR data, skil
 | `mcp__hh__search_hh_employers` | Find companies by name |
 | `mcp__hh__get_hh_employer_details` | Company profile + open vacancies count |
 | `mcp__hh__get_hh_reference` | Region codes, professional roles, skill autocomplete, dictionaries |
+| `mcp__hh__search_hh_resumes` | Search candidates/resumes (needs user sign-in + paid CV access) |
+| `mcp__hh__get_hh_resume` | Full details of one resume by id (enrich before saving) |
 
 ## Common region codes
 `1` = Москва, `2` = Санкт-Петербург, `113` = Россия (вся страна).
@@ -40,6 +42,40 @@ Use `mcp__hh__get_hh_reference(type="areas", filter="<city>")` for other cities.
 **"Зарплата для [роль]":**
 1. `search_hh_vacancies(text="<роль>", area=113, per_page=100)` → extract salary ranges
 2. Compute median/range from results
+
+**"Найди кандидатов с критериями" (resume search + save):**
+1. `search_hh_resumes(text="<роль/навыки>", area=<code>, experience=<level>)`.
+2. Present the results to the user as a clean numbered list: role, region, experience, salary,
+   and the **resume link** for each. Then ASK which candidates to save — never save automatically.
+3. When the user picks candidates (e.g. "сохрани 1, 3 и 5"):
+   - For each chosen candidate, take the resume URL and derive `resume_id` (last segment of hh.ru/resume/<id>).
+   - Optionally `get_hh_resume(resume_id)` to enrich (skills, work history, education).
+   - Save with `add_document_to_kb(database_name="candidates", document={...}, filename="candidate-<id>.json")`.
+4. Confirm briefly which candidates were saved (no internal mechanics).
+
+### Candidate document schema (database `candidates`)
+Keep field names consistent. One document = candidate + their resume together:
+```json
+{
+  "candidate": "<role/title, e.g. 'Python-разработчик'>",
+  "resume_id": "<hh id>",
+  "resume_url": "https://hh.ru/resume/<id>",
+  "area": "<region>",
+  "experience_years": <int>,
+  "key_skills": ["..."],
+  "specializations": ["..."],
+  "salary": "<expected, if any>",
+  "education": "<level / details>",
+  "last_position": "<most recent role — company>",
+  "source": "HeadHunter",
+  "saved_at": "<YYYY-MM-DD>"
+}
+```
+Later questions like "покажи Python-разработчиков с опытом 5+ и ссылки на их резюме" are then
+answered from the `candidates` database via `query_knowledge_base`, returning summaries **and** resume links.
+
+**Personal data:** resumes are personal data. Save only candidates the user explicitly selected;
+never bulk-ingest an entire result set.
 
 ## Auth status (HH tightened their API — read this)
 The mcp__hh__* tools attach a token automatically; you never manage auth. But the token must exist:
