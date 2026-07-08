@@ -29,7 +29,10 @@ if sys.platform == "win32":
 
 import anthropic
 from dotenv import load_dotenv
-from flask import Flask, render_template, request, jsonify, send_file, abort
+from flask import (
+    Flask, render_template, request, jsonify, send_file, abort, redirect, url_for,
+    Response, stream_with_context,
+)
 
 load_dotenv()
 
@@ -40,6 +43,7 @@ from tools.call_api import api_server
 from tools.dashboard_tools import dashboard_server
 from tools.kb_tools import kb_server
 from tools.hh_tools import hh_server
+from tools import hh_auth
 
 import dashboards_store
 import uploads_store
@@ -363,18 +367,52 @@ def build_chat_prompt(history: list, new_message: str) -> str:
     return "\n".join(lines)
 
 
-async def run_chat_agent(
-    prompt: str,
-    session_id: str,
-    active_dashboard_uuid: str | None,
-    attached_files: list,
-) -> str:
-    """
-    Run the agent for a /chat request with arxiv, api, and dashboard MCP servers,
-    all skills enabled, and Write/Bash/Read/Edit built-ins for skill creation and
-    in-place dashboard editing. Returns the final text output accumulated from the
-    agent loop.
-    """
+# Progress phrases shown to the user WHILE the agent works. Keyed by tool name,
+# value is (ru, en). These are the ONLY window into the agent's activity — the
+# final answer never mentions tools. Keep them short and human.
+_STATUS_PHRASES = {
+    "WebSearch":                        ("Ищу в интернете…", "Searching the web…"),
+    "WebFetch":                         ("Читаю источники…", "Reading sources…"),
+    "mcp__arxiv__search_arxiv":         ("Ищу статьи на arXiv…", "Searching arXiv…"),
+    "mcp__arxiv__download_paper":       ("Загружаю статьи…", "Downloading papers…"),
+    "mcp__arxiv__list_downloads":       ("Проверяю загрузки…", "Checking downloads…"),
+    "mcp__kb__list_kb_databases":       ("Проверяю базы знаний…", "Checking knowledge bases…"),
+    "mcp__kb__query_knowledge_base":    ("Ищу в базе знаний…", "Searching the knowledge base…"),
+    "mcp__kb__add_document_to_kb":      ("Сохраняю в базу знаний…", "Saving to the knowledge base…"),
+    "mcp__kb__get_kb_task_status":      ("Обрабатываю…", "Processing…"),
+    "mcp__hh__search_hh_vacancies":     ("Ищу вакансии на HeadHunter…", "Searching HeadHunter vacancies…"),
+    "mcp__hh__get_hh_vacancy":          ("Смотрю вакансию…", "Fetching a vacancy…"),
+    "mcp__hh__search_hh_employers":     ("Ищу компании на HeadHunter…", "Searching HeadHunter employers…"),
+    "mcp__hh__get_hh_employer_details": ("Собираю данные о компании…", "Fetching company details…"),
+    "mcp__hh__get_hh_reference":        ("Уточняю справочники…", "Loading reference data…"),
+    "mcp__hh__search_hh_resumes":       ("Ищу резюме…", "Searching resumes…"),
+    "mcp__dashboard__create_dashboard": ("Собираю дашборд…", "Building the dashboard…"),
+    "mcp__dashboard__extract_text":     ("Извлекаю текст…", "Extracting text…"),
+    "mcp__api__call_api":               ("Обращаюсь к внешнему сервису…", "Contacting an external service…"),
+    "Read":                             ("Читаю файл…", "Reading a file…"),
+    "Write":                            ("Готовлю файл…", "Preparing a file…"),
+    "Edit":                             ("Вношу изменения…", "Applying changes…"),
+    "Bash":                             ("Выполняю…", "Working…"),
+    "Skill":                            ("Готовлюсь…", "Getting ready…"),
+}
+_STATUS_FALLBACK = ("Обрабатываю запрос…", "Working…")
+
+
+def _detect_lang(text: str) -> str:
+    """Very small heuristic: any Cyrillic → 'ru', else 'en'."""
+    for ch in text:
+        if "Ѐ" <= ch <= "ӿ":
+            return "ru"
+    return "en"
+
+
+def _status_phrase(tool_name: str, lang: str) -> str:
+    ru, en = _STATUS_PHRASES.get(tool_name, _STATUS_FALLBACK)
+    return ru if lang == "ru" else en
+
+
+def _build_chat_options(session_id, active_dashboard_uuid, attached_files):
+    """Build ClaudeAgentOptions (system prompt + MCP servers + allowed tools) for /chat."""
     context_lines = [f"Session ID: {session_id}"]
     if active_dashboard_uuid:
         context_lines.append(
@@ -399,19 +437,33 @@ async def run_chat_agent(
 
     system_prompt = (
         "You are Arxivist, an intelligent research assistant with self-extending capabilities.\n\n"
+        "## Output style (IMPORTANT — the user sees ONLY your final message):\n"
+        "- Reply with the RESULT only, in the user's language. Clean, well-formatted markdown.\n"
+        "- NEVER expose internal mechanics: no tool names, no MCP/skill names, no endpoint URLs, "
+        "no database/collection/file names, no JSON payloads, no HTTP status codes, no 'I called…', "
+        "no step-by-step narration of what you did.\n"
+        "- Do not describe HOW you found something (web, knowledge base, HeadHunter, arXiv). Just present "
+        "what you found. You may cite real external source URLs when relevant (e.g. article links).\n"
+        "- No preambles like 'Let me…', 'I'll now…', 'Here's what I did'. Lead with the answer.\n"
+        "- If something genuinely failed, say so briefly in plain language and what the user can do — "
+        "without dumping raw errors or internal details.\n"
+        "- Exception: sign-in links you are told to surface (e.g. HeadHunter authorization) MUST be shown.\n\n"
         "## Native MCP tools (use directly — no SKILL.md needed):\n\n"
-        "Knowledge base — READ ONLY (neo.rndl.ru:5001, ArangoDB):\n"
+        "Knowledge base (neo.rndl.ru:5001, ArangoDB graph):\n"
         "  mcp__kb__list_kb_databases        — list all databases\n"
         "  mcp__kb__query_knowledge_base     — ask a natural language question (CALL THIS FIRST)\n"
+        "  mcp__kb__add_document_to_kb       — ingest a structured JSON document (auto-creates db)\n"
         "  mcp__kb__get_kb_task_status       — poll async task status\n"
-        "  NOTE: This KB does not support raw text ingestion via API. "
-        "Expansion requires server-side file access. Do not attempt to write data to it.\n\n"
+        "  NOTE: The KB ingests STRUCTURED JSON, not raw prose. When enriching, build a JSON object "
+        "with fields (company, industry, description, recent_news, vacancies, sources, …) and pass it "
+        "as the `document` argument. Use the 'companies' database for company intelligence.\n\n"
         "HeadHunter API (hh.ru):\n"
         "  mcp__hh__search_hh_vacancies      — search job vacancies\n"
         "  mcp__hh__get_hh_vacancy           — get full vacancy details\n"
         "  mcp__hh__search_hh_employers      — find companies\n"
         "  mcp__hh__get_hh_employer_details  — company profile + vacancies\n"
-        "  mcp__hh__get_hh_reference         — areas, roles, skills, dictionaries\n\n"
+        "  mcp__hh__get_hh_reference         — areas, roles, skills, dictionaries\n"
+        "  mcp__hh__search_hh_resumes        — search resumes/candidates (needs one-time sign-in)\n\n"
         "arXiv:\n"
         "  mcp__arxiv__search_arxiv, mcp__arxiv__download_paper, mcp__arxiv__list_downloads\n\n"
         "Dashboard:\n"
@@ -431,7 +483,9 @@ async def run_chat_agent(
         "If the KB has useful data → present it. "
         "If KB returns nothing → tell the user what you found (or didn't find) and ASK if they want "
         "you to search the web and enrich the KB. Do NOT start web search automatically.\n\n"
-        "2. HEADHUNTER: Use mcp__hh__* tools directly. No SKILL.md needed.\n\n"
+        "2. HEADHUNTER: Use mcp__hh__* tools directly. No SKILL.md needed. If a tool reply starts "
+        "with 'AUTHORIZATION_REQUIRED' or contains a sign-in link, present that link to the user as a "
+        "clickable markdown link (in their language) and STOP — do not retry. It is a one-time login.\n\n"
         "3. DASHBOARD: use creating-dashboards skill; if active dashboard exists, use editing-dashboards.\n\n"
         "4. NEW / UNKNOWN API: If the user provides endpoint + auth details, use creating-skills to "
         "write a SKILL.md, then immediately use mcp__api__call_api following that skill.\n\n"
@@ -468,9 +522,10 @@ async def run_chat_agent(
             # Dashboard
             "mcp__dashboard__create_dashboard",
             "mcp__dashboard__extract_text",
-            # Knowledge Base — read-only until server supports raw text ingestion
+            # Knowledge Base (read + JSON-document ingestion)
             "mcp__kb__list_kb_databases",
             "mcp__kb__query_knowledge_base",
+            "mcp__kb__add_document_to_kb",
             "mcp__kb__get_kb_task_status",
             # HeadHunter (deterministic typed tools)
             "mcp__hh__search_hh_vacancies",
@@ -478,29 +533,45 @@ async def run_chat_agent(
             "mcp__hh__search_hh_employers",
             "mcp__hh__get_hh_employer_details",
             "mcp__hh__get_hh_reference",
+            "mcp__hh__search_hh_resumes",
         ],
         max_turns=60,
         system_prompt=system_prompt,
         max_buffer_size=AGENT_MAX_BUFFER_SIZE,
     )
 
-    collected_text = []
+    return options
+
+
+async def run_chat_stream(prompt, options, lang):
+    """
+    Drive the agent loop and yield events:
+      {"type": "status", "phrase": <str>}  — emitted when the agent starts a tool
+      {"type": "final",  "text": <str>}    — the clean final answer text (last text-only turn)
+    Only the last assistant turn WITHOUT tool calls is treated as the answer, so
+    intermediate reasoning/narration never reaches the user.
+    """
+    final_text = ""
     turn = 0
     async for message in query(prompt=prompt, options=options):
         turn += 1
-        mtype = type(message).__name__
-        if hasattr(message, "content") and isinstance(message.content, list):
-            for block in message.content:
-                if hasattr(block, "name"):
-                    log.info("Chat agent turn %d: called tool %s", turn, block.name)
-                elif hasattr(block, "text") and block.text:
-                    collected_text.append(block.text)
-                    snippet = block.text[:120].encode("ascii", "replace").decode()
-                    log.info("Chat agent turn %d: text — %s", turn, snippet)
-        else:
-            log.info("Chat agent turn %d: %s", turn, mtype)
+        if not (hasattr(message, "content") and isinstance(message.content, list)):
+            continue
+        turn_text = []
+        used_tool = False
+        for block in message.content:
+            if hasattr(block, "name") and block.name:
+                used_tool = True
+                phrase = _status_phrase(block.name, lang)
+                log.info("Chat turn %d: tool %s", turn, block.name)
+                yield {"type": "status", "phrase": phrase}
+            elif hasattr(block, "text") and block.text:
+                turn_text.append(block.text)
+        # A text-only assistant message is the (running) final answer; keep the latest.
+        if turn_text and not used_tool:
+            final_text = "\n\n".join(turn_text)
 
-    return "\n\n".join(t for t in collected_text if t.strip())
+    yield {"type": "final", "text": final_text}
 
 
 def _resolve_attached_files(file_ids: list) -> list:
@@ -525,8 +596,18 @@ def _resolve_attached_files(file_ids: list) -> list:
     return resolved
 
 
+def _sse(event: dict) -> str:
+    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
 @app.route("/chat", methods=["POST"])
 def chat():
+    """
+    Streams Server-Sent Events:
+      {"type":"status","phrase":"…"}  — progress phrases shown WHILE processing
+      {"type":"result", ...}          — final answer + files (rendered as the reply)
+    The final answer contains no internal mechanics (enforced by the system prompt).
+    """
     data = request.get_json()
     message = (data.get("message") or "").strip()
     history = data.get("history") or []
@@ -540,80 +621,113 @@ def chat():
 
     attached_files = _resolve_attached_files(attached_file_ids)
     active_dashboard_uuid = dashboards_store.get_active(session_id)
+    lang = _detect_lang(message)
 
     log.info(
         "Chat message received: %r | history=%d | session=%s | attached=%d | active_dashboard=%s",
         message, len(history), session_id, len(attached_files), active_dashboard_uuid,
     )
-    start = time.time()
 
-    try:
-        reset_session()
+    def generate():
+        start = time.time()
+        try:
+            reset_session()
+            prompt = build_chat_prompt(history, message)
+            options = _build_chat_options(session_id, active_dashboard_uuid, attached_files)
 
-        prompt = build_chat_prompt(history, message)
-        agent_text = asyncio.run(
-            run_chat_agent(prompt, session_id, active_dashboard_uuid, attached_files)
-        )
+            yield _sse({"type": "status", "phrase": "Думаю…" if lang == "ru" else "Thinking…"})
 
-        session = get_session()
-        log.info(
-            "Chat agent finished: %d papers found, %d downloaded",
-            len(session["papers"]),
-            len(session["downloaded"]),
-        )
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            final_text = ""
+            try:
+                agen = run_chat_stream(prompt, options, lang)
+                while True:
+                    try:
+                        event = loop.run_until_complete(agen.__anext__())
+                    except StopAsyncIteration:
+                        break
+                    if event["type"] == "status":
+                        yield _sse(event)
+                    elif event["type"] == "final":
+                        final_text = event["text"]
+            finally:
+                loop.close()
 
-        # Decide what to return:
-        # - If the agent produced a dashboard this turn (active UUID changed, OR
-        #   agent_text contains a `/d/<uuid>` link), prefer the agent's text so
-        #   the dashboard link survives.
-        # - Otherwise, if papers were downloaded this session, run the structured
-        #   summary path (existing behavior).
-        # - Otherwise, use the agent's text output.
-        new_active = dashboards_store.get_active(session_id)
-        produced_dashboard = (
-            (new_active and new_active != active_dashboard_uuid)
-            or ("/d/" in agent_text)
-        )
+            session = get_session()
+            log.info(
+                "Chat agent finished: %d papers found, %d downloaded",
+                len(session["papers"]), len(session["downloaded"]),
+            )
 
-        if produced_dashboard and agent_text.strip():
-            reply = agent_text
-        elif session["papers"] and session["downloaded"]:
-            reply = summarize_papers(session, message)
-        elif agent_text.strip():
-            reply = agent_text
-        else:
+            # Decide the reply: dashboard link > structured paper summary > agent text.
+            new_active = dashboards_store.get_active(session_id)
+            produced_dashboard = (
+                (new_active and new_active != active_dashboard_uuid) or ("/d/" in final_text)
+            )
+
+            if produced_dashboard and final_text.strip():
+                reply = final_text
+            elif session["papers"] and session["downloaded"]:
+                yield _sse({"type": "status", "phrase": "Готовлю обзор…" if lang == "ru" else "Summarizing…"})
+                reply = summarize_papers(session, message)
+            elif final_text.strip():
+                reply = final_text
+            else:
+                error_report = _format_error_report(session)
+                if error_report:
+                    reply = error_report
+                else:
+                    reply = ("Не удалось выполнить запрос. Попробуйте переформулировать или добавить детали."
+                             if lang == "ru" else
+                             "I couldn't complete that request. Please try again or add detail.")
+
+            elapsed = time.time() - start
+            log.info("Chat pipeline completed in %.2f seconds", elapsed)
+
+            session_files = []
+            for fname in session["downloaded"]:
+                path = os.path.join(DOWNLOADS_DIR, fname)
+                if os.path.exists(path):
+                    size_kb = os.path.getsize(path) / 1024
+                    session_files.append({"name": fname, "size_kb": round(size_kb, 1)})
+
+            yield _sse({
+                "type": "result",
+                "reply": reply,
+                "files": session_files,
+                "search_query": session.get("search_query", ""),
+                "elapsed_seconds": round(elapsed, 2),
+            })
+
+        except Exception as e:
+            elapsed = time.time() - start
+            log.exception("Chat failed after %.2fs", elapsed)
+            session = get_session()
             error_report = _format_error_report(session)
-            reply = error_report if error_report else "I wasn't able to complete that request. Please try again or provide more detail."
+            if error_report:
+                reply = error_report
+            else:
+                reply = ("Произошла ошибка при обработке запроса. Попробуйте ещё раз."
+                         if lang == "ru" else
+                         "Something went wrong while processing your request. Please try again.")
+            yield _sse({
+                "type": "result",
+                "reply": reply,
+                "files": [],
+                "search_query": session.get("search_query", ""),
+                "elapsed_seconds": round(elapsed, 2),
+            })
 
-        elapsed = time.time() - start
-        log.info("Chat pipeline completed in %.2f seconds", elapsed)
-
-        session_files = []
-        for fname in session["downloaded"]:
-            path = os.path.join(DOWNLOADS_DIR, fname)
-            if os.path.exists(path):
-                size_kb = os.path.getsize(path) / 1024
-                session_files.append({"name": fname, "size_kb": round(size_kb, 1)})
-
-        return jsonify({
-            "reply": reply,
-            "files": session_files,
-            "search_query": session.get("search_query", ""),
-            "elapsed_seconds": round(elapsed, 2),
-        })
-
-    except Exception as e:
-        elapsed = time.time() - start
-        log.error("Chat failed after %.2f seconds: %s", elapsed, e)
-        session = get_session()
-        error_report = _format_error_report(session)
-        reply = f"### Request failed\n\n{error_report}" if error_report else f"### Request failed\n\n**Error:** {e}"
-        return jsonify({
-            "reply": reply,
-            "files": [],
-            "search_query": session.get("search_query", ""),
-            "elapsed_seconds": round(elapsed, 2),
-        })
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # disable nginx response buffering for SSE
+        },
+    )
 
 
 @app.route("/files")
@@ -706,6 +820,74 @@ def proxy_mode():
         return jsonify({"error": f"Bridge returned HTTP {e.code}: {err}"}), 502
     except Exception as e:
         return jsonify({"error": f"Bridge unreachable: {e}"}), 502
+
+
+# ---------------------------------------------------------------------------
+# HeadHunter OAuth2 — one-time browser flow to obtain a user access token.
+#   /hh/authorize → redirects to hh.ru consent screen
+#   /hh/callback  → hh.ru redirects back here with ?code=…, we exchange + store
+#   /hh/status    → JSON status of the current token
+# The token is persisted to config/hh_token.json and read by tools/hh_tools.py.
+# ---------------------------------------------------------------------------
+
+def _hh_redirect_uri() -> str:
+    """
+    The redirect URI to hand HH. An explicit HH_REDIRECT_URI env wins (pin it
+    if your registered value differs); otherwise derive it from the current
+    request so the same code works on localhost and behind the nginx sub-path.
+    Must match a Redirect URI registered in the HH app.
+    """
+    return hh_auth.HH_REDIRECT_URI or url_for("hh_callback", _external=True)
+
+
+@app.route("/hh/authorize")
+def hh_authorize():
+    if not hh_auth.HH_CLIENT_ID:
+        return (
+            "HH_CLIENT_ID is not configured. Set HH_CLIENT_ID and HH_CLIENT_SECRET "
+            "in .env, then restart.", 400,
+        )
+    return redirect(hh_auth.build_authorize_url(redirect_uri=_hh_redirect_uri()))
+
+
+@app.route("/hh/callback")
+def hh_callback():
+    error = request.args.get("error")
+    if error:
+        desc = request.args.get("error_description", "")
+        return f"<h2>HeadHunter authorization failed</h2><p>{error}: {desc}</p>", 400
+
+    code = request.args.get("code")
+    if not code:
+        return "<h2>Missing authorization code</h2>", 400
+
+    result = hh_auth.exchange_code(code, redirect_uri=_hh_redirect_uri())
+    if not result["ok"]:
+        return f"<h2>Token exchange failed</h2><pre>{result['error']}</pre>", 502
+
+    log.info("HH OAuth: user token obtained and stored")
+    home = (SCRIPT_NAME or "") + "/"
+    return (
+        "<html><body style='font-family:sans-serif;max-width:600px;margin:3rem auto'>"
+        "<h2>✓ HeadHunter connected</h2>"
+        "<p>Access token stored. Resume/candidate search is now available to the agent.</p>"
+        f"<p><a href='{home}'>← Back to Arxivist</a></p>"
+        "</body></html>"
+    )
+
+
+@app.route("/hh/status")
+def hh_status():
+    return jsonify(hh_auth.token_status())
+
+
+@app.route("/hh/app-token", methods=["POST"])
+def hh_app_token():
+    """Obtain a client_credentials application token (no user interaction)."""
+    result = hh_auth.get_app_token()
+    if not result["ok"]:
+        return jsonify({"error": result["error"]}), 502
+    return jsonify({"ok": True, "status": hh_auth.token_status()})
 
 
 if __name__ == "__main__":

@@ -41,7 +41,17 @@ Use `mcp__hh__get_hh_reference(type="areas", filter="<city>")` for other cities.
 1. `search_hh_vacancies(text="<роль>", area=113, per_page=100)` → extract salary ranges
 2. Compute median/range from results
 
-## Auth status
-- Without `HH_ACCESS_TOKEN`: works for all public endpoints (vacancies, employers, reference)
-- With `HH_ACCESS_TOKEN`: higher rate limits + protected endpoints
-- Resume search (`/resumes`): requires OAuth token + paid employer subscription on hh.ru
+## Auth status (HH tightened their API — read this)
+The mcp__hh__* tools attach a token automatically; you never manage auth. But the token must exist:
+
+| Endpoint | Needs token? |
+|---|---|
+| `get_hh_reference` areas / professional_roles / dictionaries | No (public) |
+| `search_hh_vacancies`, `get_hh_vacancy` | **Yes** — HH returns 403 without one |
+| `search_hh_employers`, `get_hh_employer_details` | **Yes** — 403 without one |
+| resume search | Yes + paid employer CV-subscription |
+
+- **Application token (covers vacancy/employer search):** set `HH_CLIENT_ID` + `HH_CLIENT_SECRET` in .env.
+  The tools then mint a `client_credentials` token automatically — no user login needed.
+- **User token (for resumes):** operator visits `/hh/authorize` once; token stored + auto-refreshed.
+- If a tool returns a 403 message, tell the user to configure `HH_CLIENT_ID`/`HH_CLIENT_SECRET`.

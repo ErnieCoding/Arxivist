@@ -21,7 +21,29 @@
       "Bash(python3)",
       "Bash(chmod +x /home/ernest/Desktop/Misc/RConf/Arxivist/entrypoint.sh)",
       "Bash(python3 -c \"import ast; ast.parse\\(open\\('/home/ernest/Desktop/Misc/RConf/Arxivist/bridge/bridge.py'\\).read\\(\\)\\); print\\('bridge.py: OK'\\)\")",
-      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/home/ernest/Desktop/Misc/RConf/Arxivist/bridge/bridge.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/home/ernest/Desktop/Misc/RConf/Arxivist/bridge/bridge.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(echo \"Яндекс — российская технологическая компания, основанная в 1997 году. Продукты: поиск, Яндекс.Такси, Яндекс.Маркет, облако, YandexGPT \\(ИИ\\). Штаб-квартира в Москве.\")",
+      "Bash(base64 -w0 /tmp/yandex_test.txt)",
+      "Bash(echo \"=== 1. POST /api/server/database/add-file \\(content field, existing db 'demo'\\) ===\")",
+      "Bash(curl -s -w '\\\\nHTTP:%{http_code}\\\\n' -X POST http://neo.rndl.ru:5001/api/server/database/add-file -H 'X-API-Key: NbTIun70YPZNE20BIBL4GYIqXHfSEnkc5Q09xUApYY8' -H 'Content-Type: application/json' -d '{\"database_name\":\"demo\",\"filename\":\"yandex_test.txt\",\"file_type\":\"txt\",\"content\":\"Yandex is a Russian tech company founded in 1997.\"}')",
+      "Bash(echo \"\")",
+      "Bash(curl -s -w '\\\\nHTTP:%{http_code}\\\\n' -X DELETE http://neo.rndl.ru:5001/api/database/delete -H 'X-API-Key: NbTIun70YPZNE20BIBL4GYIqXHfSEnkc5Q09xUApYY8' -H 'Content-Type: application/json' -d '{\"database_name\":\"companies\"}')",
+      "Bash(curl -s -H 'X-API-Key: NbTIun70YPZNE20BIBL4GYIqXHfSEnkc5Q09xUApYY8' http://neo.rndl.ru:5001/api/databases)",
+      "Bash(python3 -m py_compile app.py tools/kb_tools.py tools/hh_tools.py tools/hh_auth.py bridge/bridge.py arxiv_tools.py)",
+      "Bash(curl -s -o /dev/null -w '%{http_code}\\\\n' -H 'User-Agent: Arxivist/1.0 \\(info@cyberskill.net\\)' 'https://api.hh.ru/vacancies?text=python&per_page=1')",
+      "Bash(curl -s -o /dev/null -w '%{http_code}\\\\n' -H 'User-Agent: Mozilla/5.0 \\(X11; Linux x86_64\\) AppleWebKit/537.36' 'https://api.hh.ru/vacancies?text=python&per_page=1')",
+      "Bash(curl -s -o /dev/null -w '%{http_code}\\\\n' 'https://api.hh.ru/vacancies?text=python&per_page=1')",
+      "Bash(curl -s -o /dev/null -w '%{http_code}\\\\n' -H 'User-Agent: api-test/1.0' 'https://api.hh.ru/vacancies?text=python&per_page=1')",
+      "Bash(curl -s -H \"User-Agent: Mozilla/5.0\" \"https://api.hh.ru/vacancies?text=python&per_page=1\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" -H \"User-Agent: Mozilla/5.0\" \"https://api.hh.ru/areas\")",
+      "Bash(python3 -m py_compile app.py tools/hh_tools.py tools/hh_auth.py tools/kb_tools.py)",
+      "Bash(./venv/bin/python -c ' *)",
+      "Bash(./venv/bin/pip install *)",
+      "Bash(curl -sN -X POST http://127.0.0.1:5000/chat -H 'Content-Type: application/json' -d '{\"message\":\"Привет! В двух словах — что ты умеешь?\",\"history\":[],\"session_id\":\"test-sess-1\",\"attached_file_ids\":[]}' --max-time 120)",
+      "Bash(sudo chown -R ernest:ernest dashboards downloads uploads)",
+      "Bash(curl -sN -X POST http://127.0.0.1:5000/chat -H 'Content-Type: application/json' -d '{\"message\":\"Что известно о компании Сбер?\",\"history\":[],\"session_id\":\"test-sess-2\",\"attached_file_ids\":[]}' --max-time 150)",
+      "Bash(curl -sN -X POST http://127.0.0.1:5000/chat -H 'Content-Type: application/json' -d '{\"message\":\"What do you know about Yandex?\",\"history\":[],\"session_id\":\"test-sess-3\",\"attached_file_ids\":[]}' --max-time 150)",
+      "Bash(git check-ignore *)"
     ]
   }
 }

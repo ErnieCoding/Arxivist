@@ -298,7 +298,7 @@
             gap: 2px;
         }
 
-        .typing-indicator span {
+        .typing-indicator .dot {
             width: 6px;
             height: 6px;
             background: #555;
@@ -308,8 +308,16 @@
             animation: bounce 0.9s infinite;
         }
 
-        .typing-indicator span:nth-child(2) { animation-delay: 0.15s; }
-        .typing-indicator span:nth-child(3) { animation-delay: 0.3s; }
+        .typing-indicator .dot:nth-child(2) { animation-delay: 0.15s; }
+        .typing-indicator .dot:nth-child(3) { animation-delay: 0.3s; }
+
+        .typing-indicator .status-text {
+            color: #8b9cf7;
+            font-size: 0.82rem;
+            margin-right: 0.5rem;
+            font-style: italic;
+        }
+        .typing-indicator .status-text:empty { display: none; margin: 0; }
 
         @keyframes bounce {
             0%, 60%, 100% { transform: translateY(0); }
@@ -682,8 +690,8 @@
             } else {
                 div.className = 'msg-assistant';
                 div.innerHTML = marked.parse(content);
-                // Make /d/<uuid> dashboard links open in a new tab.
-                div.querySelectorAll('a[href*="/d/"]').forEach(a => { a.target = '_blank'; a.rel = 'noopener'; });
+                // Make dashboard (/d/) and HeadHunter sign-in (/hh/) links open in a new tab.
+                div.querySelectorAll('a[href*="/d/"], a[href*="/hh/"]').forEach(a => { a.target = '_blank'; a.rel = 'noopener'; });
             }
             messagesArea.appendChild(div);
             scrollToBottom();
@@ -704,12 +712,16 @@
             return meta;
         }
 
-        function showTypingIndicator() {
-            const div = document.createElement('div');
-            div.className = 'typing-indicator';
-            div.id = 'typingIndicator';
-            div.innerHTML = '<span></span><span></span><span></span>';
-            messagesArea.appendChild(div);
+        function showTypingIndicator(phrase) {
+            let div = document.getElementById('typingIndicator');
+            if (!div) {
+                div = document.createElement('div');
+                div.className = 'typing-indicator';
+                div.id = 'typingIndicator';
+                div.innerHTML = '<span class="status-text"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span>';
+                messagesArea.appendChild(div);
+            }
+            div.querySelector('.status-text').textContent = phrase || '';
             scrollToBottom();
         }
 
@@ -836,26 +848,65 @@
                     }),
                 });
 
-                const data = await resp.json();
-                removeTypingIndicator();
+                // Validation errors (400) come back as plain JSON, not a stream.
+                const ctype = resp.headers.get('Content-Type') || '';
+                if (!resp.ok && ctype.includes('application/json')) {
+                    const data = await resp.json();
+                    removeTypingIndicator();
+                    appendMessage('assistant', `**Error:** ${data.error || 'Request failed.'}`);
+                    appendMeta('assistant');
+                    return;
+                }
 
-                if (data.error) {
-                    appendMessage('assistant', `**Error:** ${data.error}`);
-                    appendMeta('assistant', { elapsedSeconds: data.elapsed_seconds });
-                } else {
-                    const reply = data.reply || 'No response received.';
+                // Stream Server-Sent Events: status phrases while processing, then a result.
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let result = null;
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+
+                    let idx;
+                    while ((idx = buffer.indexOf('\n\n')) >= 0) {
+                        const rawEvent = buffer.slice(0, idx);
+                        buffer = buffer.slice(idx + 2);
+                        const payload = rawEvent.split('\n')
+                            .filter(l => l.startsWith('data:'))
+                            .map(l => l.slice(5).trim())
+                            .join('');
+                        if (!payload) continue;
+                        let ev;
+                        try { ev = JSON.parse(payload); } catch (e) { continue; }
+
+                        if (ev.type === 'status') {
+                            showTypingIndicator(ev.phrase);
+                        } else if (ev.type === 'result') {
+                            result = ev;
+                        }
+                    }
+                }
+
+                removeTypingIndicator();
+                if (result) {
+                    const reply = result.reply || 'No response received.';
                     appendMessage('assistant', reply);
-                    appendMeta('assistant', { elapsedSeconds: data.elapsed_seconds });
+                    appendMeta('assistant', { elapsedSeconds: result.elapsed_seconds });
                     conversationHistory.push({ role: 'assistant', content: reply });
 
-                    if (data.search_query) {
-                        statusLine.innerHTML = `arXiv query: <span class="query-text">${escapeHtml(data.search_query)}</span>`;
+                    if (result.search_query) {
+                        statusLine.innerHTML = `arXiv query: <span class="query-text">${escapeHtml(result.search_query)}</span>`;
                     } else {
                         statusLine.textContent = '';
                     }
 
                     refreshFiles();
                     refreshDashboards();
+                } else {
+                    appendMessage('assistant', 'No response received.');
+                    appendMeta('assistant');
                 }
             } catch (err) {
                 removeTypingIndicator();

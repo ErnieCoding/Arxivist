@@ -6,10 +6,17 @@ description: Creates new SKILL.md files that teach the agent how to interact wit
 # Creating Skills
 
 ## When to activate
-- User mentions a database or API with no existing skill (e.g., ArangoDB, Chroma, Qdrant, Postgres, Pinecone, a custom API).
+- User mentions a database or API with no existing skill (e.g., Chroma, Qdrant, Postgres, Pinecone, Bitrix24, a custom API).
 - User provides endpoint URLs, base URLs, auth headers, API keys, or request body schemas.
 - User asks to "add to", "store in", "retrieve from", or "connect to" a system with no matching skill.
 - An existing skill is missing an endpoint the user just described — update it instead of creating a new one.
+
+## When NOT to use (these already have native, typed tools — no skill needed)
+- **Knowledge base** (neo.rndl.ru) → use the `mcp__kb__*` tools directly.
+- **HeadHunter** → use the `mcp__hh__*` tools directly.
+- **arXiv** → use the `mcp__arxiv__*` tools directly.
+- **Dashboards** → use the `mcp__dashboard__*` tools / dashboard skills.
+Only create a skill for a system that has NO dedicated tool. New skills route through the generic `mcp__api__call_api` HTTP tool.
 
 ## Step 1 — Check for existing skills first
 
@@ -59,7 +66,7 @@ Read the credential at runtime:
 ```bash
 echo $<ENV_VAR_NAME>
 ```
-Store the value in a variable and pass it in the `headers` parameter of `api:call_api`.
+Store the value in a variable and pass it in the `headers` parameter of `mcp__api__call_api`.
 
 ## Endpoints
 
@@ -81,9 +88,9 @@ Store the value in a variable and pass it in the `headers` parameter of `api:cal
 
 ## How to call this API
 
-Use `api:call_api` for all requests. Construct calls as:
+Use `mcp__api__call_api` for all requests. Construct calls as:
 ```
-api:call_api(
+mcp__api__call_api(
   url="<full URL>",
   method="<METHOD>",
   headers={"<auth-header>": "<value-from-env>"},
@@ -101,14 +108,15 @@ api:call_api(
 <Any caveats, rate limits, known error codes, or special handling.>
 ```
 
-## Step 4 — Confirm and execute
+## Step 4 — Execute (silently)
 
 After writing the file:
-1. Tell the user: "I've created the `<skill-name>` skill. Proceeding with your request now."
-2. Immediately use the new skill to complete the original user request — do not wait for the user to ask again.
+1. Do NOT announce that you created a skill or describe the internal setup — that is internal plumbing the user does not need to see.
+2. Immediately use the new skill (`mcp__api__call_api`) to complete the original user request — do not wait for the user to ask again.
 3. If the original request requires papers to be downloaded first, run the searching-arxiv skill before ingesting.
+4. Present only the final result to the user, in their language.
 
 ## Notes
-- Skills are plain-text instruction files — never generate Python code or modify tools.py.
+- Skills are plain-text instruction files — never generate Python code or modify the Python tool files under `tools/`.
 - Keep SKILL.md bodies concise. Under 300 lines is ideal.
 - If the user provides partial information (e.g., base URL but no endpoints), create a placeholder skill and note what's missing.

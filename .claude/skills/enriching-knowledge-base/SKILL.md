@@ -28,34 +28,41 @@ Step 3: HH data (if focus = vacancies/HR)
   → mcp__hh__search_hh_employers(text="<company name>")
   → mcp__hh__get_hh_employer_details(employer_id=<id>, include_vacancies=true)
 
-Step 4: Structure the gathered data
-  Write self-contained factual paragraphs. One topic per paragraph (300-800 tokens):
-    • Company profile (industry, size, founding, HQ, products/services)
-    • HR & people (culture, hiring approach, key executives)
-    • Recent news (list of dated events)
-    • Vacancies (count, key roles, salary ranges, required skills)
-    • Competitors (names + 1-line context)
-    • Financials (revenue, funding — only public data)
+Step 4: Structure the gathered data into ONE JSON object
+  The KB ingests structured JSON (not prose). Build a single document with
+  consistent field names (see ingesting-to-knowledge-base for the full schema):
+    {
+      "company": "<Name>",
+      "aliases": ["<English name>"],
+      "industry": "...",
+      "founded": <year>,
+      "headquarters": "...",
+      "website": "...",
+      "employees": "...",
+      "description": "2-4 sentence overview",
+      "focus_area": "<the user's area of interest>",
+      "hr_and_people": "...",
+      "recent_news": [{"date": "YYYY-MM", "event": "..."}],
+      "vacancies": {"count": <n>, "key_roles": ["..."]},
+      "competitors": ["..."],
+      "financials": "...",
+      "sources": ["<URL>", "..."],
+      "gathered_at": "<today YYYY-MM-DD>"
+    }
+  Only include fields you actually found — do not fabricate.
 
-Step 5: Ensure database exists
-  → mcp__kb__list_kb_databases()
-  If "companies" not in list:
-    → mcp__kb__create_kb_database(database_name="companies")
-
-Step 6: Ingest chunks
-  → mcp__kb__expand_knowledge_base(
+Step 5: Ingest (auto-creates the database on first use)
+  → mcp__kb__add_document_to_kb(
       database_name="companies",
-      texts=["<chunk1>", "<chunk2>", ...],
-      metadata=[
-        {"type": "company_profile", "source": "<URL>", "company": "<Name>", "date": "<YYYY-MM-DD>"},
-        ...
-      ]
+      document={ ...the JSON object above... },
+      filename="<company-slug>.json"
     )
-  If response is 202 with task_id:
-    → mcp__kb__get_kb_task_status(task_id=<id>)  [poll until done]
+  The tool creates 'companies' if missing, else appends, and waits for processing.
 
-Step 7: Report to user
-  "Добавил X чанков о компании Y в базу знаний 'companies'. Источники: ..."
+Step 6: Report to user (clean, user-facing)
+  Briefly confirm that information about the company was gathered and saved,
+  then present the key findings and list the sources. Do NOT expose database
+  names, filenames, JSON, tool names, or step-by-step mechanics.
 ```
 
 ## Notes
@@ -63,4 +70,4 @@ Step 7: Report to user
 - Disclose sources to the user
 - Do not invent data not found in search results
 - Limit to 5-8 web pages to stay within time budget
-- Each chunk should be standalone — the KB stores them as independent graph nodes
+- One JSON document per company; keep field names stable so the graph schema is consistent

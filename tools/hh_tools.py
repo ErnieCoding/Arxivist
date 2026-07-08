@@ -18,17 +18,27 @@ import urllib.request
 
 from claude_agent_sdk import tool, create_sdk_mcp_server
 
+from . import hh_auth
+
 log = logging.getLogger(__name__)
 
 HH_BASE_URL = "https://api.hh.ru"
 HH_USER_AGENT = "Arxivist/1.0 (info@cyberskill.net)"
-HH_ACCESS_TOKEN = os.environ.get("HH_ACCESS_TOKEN", "")
+
+
+def _auth_link() -> str:
+    """Relative path to the HH login route, resolved against the app origin."""
+    base = os.environ.get("APP_BASE", "").rstrip("/")
+    return f"{base}/hh/authorize"
 
 
 def _headers() -> dict:
     h = {"User-Agent": HH_USER_AGENT, "Accept": "application/json"}
-    if HH_ACCESS_TOKEN:
-        h["Authorization"] = f"Bearer {HH_ACCESS_TOKEN}"
+    # Read the token fresh each call so a token obtained via /hh/authorize
+    # (or a refreshed one) is picked up without restarting the app.
+    token = hh_auth.load_access_token()
+    if token:
+        h["Authorization"] = f"Bearer {token}"
     return h
 
 
@@ -55,6 +65,12 @@ def _get(path: str, params: dict | None = None, timeout: int = 30) -> dict:
             except Exception:
                 pass
             log.error("HH API HTTP %d %s: %s", e.code, path, err)
+            if e.code == 403:
+                return {"ok": False, "error": (
+                    "HTTP 403 (forbidden). HeadHunter requires an access token for search "
+                    "endpoints. Set HH_CLIENT_ID and HH_CLIENT_SECRET in .env (an application "
+                    "token is then obtained automatically), or authorize a user token via /hh/authorize."
+                )}
             return {"ok": False, "error": f"HTTP {e.code}: {err}"}
         except Exception as e:
             log.error("HH API error %s: %s", path, e)
@@ -361,14 +377,13 @@ async def get_hh_employer_details(args: dict) -> dict:
         "properties": {
             "type": {
                 "type": "string",
-                "enum": ["areas", "professional_roles", "specializations", "dictionaries", "skills"],
+                "enum": ["areas", "professional_roles", "dictionaries", "skills"],
                 "description": (
                     "What to retrieve: "
-                    "'areas' = region tree with codes; "
-                    "'professional_roles' = role taxonomy with IDs; "
-                    "'specializations' = specialization groups; "
-                    "'dictionaries' = all enum values (experience, employment, schedule…); "
-                    "'skills' = skill name autocomplete (requires 'query' param)."
+                    "'areas' = region tree with codes (public); "
+                    "'professional_roles' = role taxonomy with IDs (public); "
+                    "'dictionaries' = all enum values — experience, employment, schedule… (public); "
+                    "'skills' = skill name autocomplete (requires 'query' param; may need auth)."
                 ),
             },
             "query": {
@@ -390,7 +405,6 @@ async def get_hh_reference(args: dict) -> dict:
     path_map = {
         "areas": "/areas",
         "professional_roles": "/professional_roles",
-        "specializations": "/specializations",
         "dictionaries": "/dictionaries",
         "skills": "/skills",
     }
@@ -438,16 +452,6 @@ async def get_hh_reference(args: dict) -> dict:
                     lines.append(f"  [{cat_name}] {name} (id={role.get('id')})")
         text = f"Professional roles ({len(lines)}):\n" + "\n".join(lines[:200])
 
-    elif ref_type == "specializations":
-        lines = []
-        for group in (data if isinstance(data, list) else []):
-            g_name = group.get("name", "?")
-            for spec in group.get("specializations", []):
-                name = spec.get("name", "?")
-                if not filter_term or filter_term in name.lower() or filter_term in g_name.lower():
-                    lines.append(f"  [{g_name}] {name} (id={spec.get('id')})")
-        text = f"Specializations ({len(lines)}):\n" + "\n".join(lines[:200])
-
     elif ref_type == "dictionaries":
         lines = []
         for key, items in (data.items() if isinstance(data, dict) else {}.items()):
@@ -470,12 +474,95 @@ async def get_hh_reference(args: dict) -> dict:
     return {"content": [{"type": "text", "text": text}]}
 
 
+@tool(
+    "search_hh_resumes",
+    (
+        "Search HeadHunter resumes / candidates. Requires a user OAuth token AND a paid employer "
+        "CV-database subscription. If authorization is missing, this returns an 'authorization required' "
+        "message containing a login link — relay that link to the user; do not retry."
+    ),
+    {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "Search keywords (role, skills)."},
+            "area": {"type": "integer", "description": "Region code (1=Москва, 2=СПб, 113=Россия)."},
+            "experience": {
+                "type": "string",
+                "enum": ["noExperience", "between1And3", "between3And6", "moreThan6"],
+                "description": "Candidate experience level.",
+            },
+            "salary_from": {"type": "integer", "description": "Minimum expected salary."},
+            "per_page": {"type": "integer", "description": "Results per page (max 100, default 20)."},
+            "page": {"type": "integer", "description": "Page number (0-indexed)."},
+        },
+    },
+)
+async def search_hh_resumes(args: dict) -> dict:
+    # Resume search needs a USER token specifically. If none is present, ask
+    # the user to authorize (client_credentials app tokens cannot read resumes).
+    tok = hh_auth._read()
+    has_user_token = bool(tok.get("refresh_token")) or tok.get("grant") == "authorization_code"
+    if not has_user_token and not os.environ.get("HH_ACCESS_TOKEN"):
+        link = _auth_link()
+        return {"content": [{"type": "text", "text": (
+            "AUTHORIZATION_REQUIRED: Resume search needs a one-time HeadHunter sign-in. "
+            f"Present this login link to the user (in their language), e.g. [Войти через HeadHunter]({link}). "
+            "After they sign in once, resume search will work. Do not retry until they have signed in."
+        )}]}
+
+    params: dict = {
+        "per_page": min(int(args.get("per_page") or 20), 100),
+        "page": int(args.get("page") or 0),
+    }
+    for k_src, k_dst in (("text", "text"), ("area", "area"), ("experience", "experience"), ("salary_from", "salary_from")):
+        if args.get(k_src) is not None:
+            params[k_dst] = args[k_src]
+
+    log.info("HH resume search: %s", params)
+    result = _get("/resumes", params=params)
+
+    if not result["ok"]:
+        # A 403 here means the token lacks resume access (no paid CV subscription)
+        # or a user login is still required.
+        link = _auth_link()
+        if "403" in str(result["error"]):
+            return {"content": [{"type": "text", "text": (
+                "Resume search is unavailable: the HeadHunter account needs a paid CV-database "
+                "subscription and a user sign-in. If not signed in yet, show the user: "
+                f"[Войти через HeadHunter]({link})."
+            )}]}
+        return {"content": [{"type": "text", "text": f"Resume search failed: {result['error']}"}]}
+
+    data = result["data"]
+    items = data.get("items", [])
+    found = data.get("found", 0)
+    if not items:
+        return {"content": [{"type": "text", "text": "Резюме по заданным критериям не найдены."}]}
+
+    lines = [f"Найдено резюме: {found} (показано {len(items)})\n"]
+    for r in items:
+        title = r.get("title", "—")
+        area = (r.get("area") or {}).get("name", "?")
+        exp = (r.get("total_experience") or {}).get("months")
+        exp_str = f"{exp // 12} лет" if exp else "не указан"
+        lines.append(f"- {title} | {area} | опыт: {exp_str} | {r.get('alternate_url', '')}")
+
+    return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+
+
 # ---------------------------------------------------------------------------
 # MCP server
 # ---------------------------------------------------------------------------
 
 hh_server = create_sdk_mcp_server(
     name="hh",
-    version="1.0.0",
-    tools=[search_hh_vacancies, get_hh_vacancy, search_hh_employers, get_hh_employer_details, get_hh_reference],
+    version="1.1.0",
+    tools=[
+        search_hh_vacancies,
+        get_hh_vacancy,
+        search_hh_employers,
+        get_hh_employer_details,
+        get_hh_reference,
+        search_hh_resumes,
+    ],
 )
