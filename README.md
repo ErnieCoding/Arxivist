@@ -4,6 +4,8 @@ AI research assistant in a chat box. Search and download arXiv papers, summarize
 
 Powered by the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-python) and Flask. The agent extends itself: when you mention a new database or API, it writes its own SKILL.md file to learn how to talk to it.
 
+> **Developer documentation** — full module map, request flows, protocols, and extension guide: [docs/DEVELOPER.md](docs/DEVELOPER.md)
+
 ---
 
 ## Features

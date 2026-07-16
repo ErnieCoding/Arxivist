@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Arxivist</title>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -15,6 +16,13 @@
             background: #0f1117;
             color: #e0e0e0;
         }
+
+        /* Dark scrollbars (default light ones clash with the theme) */
+        * { scrollbar-width: thin; scrollbar-color: #333848 transparent; }
+        *::-webkit-scrollbar { width: 8px; height: 8px; }
+        *::-webkit-scrollbar-track { background: transparent; }
+        *::-webkit-scrollbar-thumb { background: #333848; border-radius: 4px; }
+        *::-webkit-scrollbar-thumb:hover { background: #454b61; }
 
         .app-wrapper {
             display: flex;
@@ -236,6 +244,7 @@
             line-height: 1.65;
             color: #ccc;
             word-break: break-word;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
         }
 
         /* Markdown inside assistant messages */
@@ -256,6 +265,7 @@
             border-radius: 4px;
             padding: 0.1em 0.4em;
             font-size: 0.85em;
+            color: #c3cef5;
         }
         .msg-assistant pre {
             background: #12141c;
@@ -272,7 +282,54 @@
             padding-left: 1.4rem;
             margin-bottom: 0.4rem;
         }
-        .msg-assistant a[href*="/d/"]::after { content: " \2197"; color: #8b9cf7; }
+
+        /* Links — bright indigo that reads well on the dark bubbles
+           (browser-default dark blue is illegible here). */
+        .msg-assistant a {
+            color: #93b0ff;
+            text-decoration: none;
+            border-bottom: 1px solid rgba(147, 176, 255, 0.35);
+            transition: color 0.15s, border-color 0.15s;
+            word-break: break-all;
+        }
+        .msg-assistant a:hover {
+            color: #c0d1ff;
+            border-bottom-color: #c0d1ff;
+        }
+        .msg-user a {
+            color: #eaf0ff;
+            text-decoration: underline;
+            text-underline-offset: 2px;
+        }
+        .msg-assistant a[href*="/d/"]::after,
+        .msg-assistant a[href*="/hh/"]::after,
+        .msg-assistant a[href^="http"]::after { content: " \2197"; font-size: 0.85em; opacity: 0.7; }
+
+        /* Tables (agent often returns candidate/vacancy tables) */
+        .msg-assistant table {
+            border-collapse: collapse;
+            margin: 0.6rem 0;
+            font-size: 0.84rem;
+            width: 100%;
+        }
+        .msg-assistant th, .msg-assistant td {
+            border: 1px solid #2a2d3a;
+            padding: 0.4rem 0.6rem;
+            text-align: left;
+        }
+        .msg-assistant th {
+            background: #202332;
+            color: #dfe4f5;
+            font-weight: 600;
+        }
+        .msg-assistant tr:nth-child(even) td { background: rgba(255, 255, 255, 0.02); }
+
+        .msg-assistant blockquote {
+            border-left: 3px solid #5b6ef5;
+            margin: 0.5rem 0;
+            padding: 0.2rem 0 0.2rem 0.85rem;
+            color: #9aa3bd;
+        }
 
         .msg-meta {
             align-self: flex-start;
@@ -689,9 +746,12 @@
                 }
             } else {
                 div.className = 'msg-assistant';
-                div.innerHTML = marked.parse(content);
-                // Make dashboard (/d/) and HeadHunter sign-in (/hh/) links open in a new tab.
-                div.querySelectorAll('a[href*="/d/"], a[href*="/hh/"]').forEach(a => { a.target = '_blank'; a.rel = 'noopener'; });
+                // Sanitize: external data (vacancy titles, resume fields, web content)
+                // flows into the agent's markdown — raw HTML in it must not execute.
+                const rawHtml = marked.parse(content);
+                div.innerHTML = (window.DOMPurify ? DOMPurify.sanitize(rawHtml) : rawHtml);
+                // Dashboard (/d/), HeadHunter (/hh/) and external links open in a new tab.
+                div.querySelectorAll('a[href*="/d/"], a[href*="/hh/"], a[href^="http"]').forEach(a => { a.target = '_blank'; a.rel = 'noopener'; });
             }
             messagesArea.appendChild(div);
             scrollToBottom();
@@ -896,6 +956,10 @@
                     appendMeta('assistant', { elapsedSeconds: result.elapsed_seconds });
                     conversationHistory.push({ role: 'assistant', content: reply });
 
+                    // The agent asked the user to sign in to HeadHunter → watch for
+                    // the token and auto-continue the flow once they're back.
+                    if (reply.includes('/hh/authorize')) startHHWatch();
+
                     if (result.search_query) {
                         statusLine.innerHTML = `arXiv query: <span class="query-text">${escapeHtml(result.search_query)}</span>`;
                     } else {
@@ -919,6 +983,66 @@
                 chatInput.focus();
             }
         }
+
+        // ===== HeadHunter auth auto-continue =====
+        // When the assistant shows a sign-in link, we arm a watcher. Two signals
+        // can complete it: (a) the callback page broadcasts on the same origin,
+        // (b) polling /hh/status detects that a user token appeared (works even
+        // if the callback tab was on a different origin or failed to signal).
+        // On success the chat auto-sends a continuation message to the agent.
+        let hhWatchActive = false;
+        let hhWatchTimer = null;
+        let hhWatchDeadline = 0;
+
+        function lastUserLang() {
+            for (let i = conversationHistory.length - 1; i >= 0; i--) {
+                if (conversationHistory[i].role === 'user') {
+                    return /[Ѐ-ӿ]/.test(conversationHistory[i].content) ? 'ru' : 'en';
+                }
+            }
+            return 'ru';
+        }
+
+        function stopHHWatch() {
+            hhWatchActive = false;
+            if (hhWatchTimer) { clearInterval(hhWatchTimer); hhWatchTimer = null; }
+        }
+
+        function hhAuthContinue() {
+            if (!hhWatchActive) return;   // only after the agent asked to sign in
+            stopHHWatch();
+            const msg = lastUserLang() === 'ru'
+                ? 'Я авторизовался в HeadHunter — продолжай.'
+                : "I've signed in to HeadHunter — please continue.";
+            const trySend = () => {
+                if (sendBtn.disabled) { setTimeout(trySend, 500); return; }  // wait out an in-flight request
+                chatInput.value = msg;
+                sendMessage();
+            };
+            trySend();
+        }
+
+        function startHHWatch() {
+            if (hhWatchActive) return;
+            hhWatchActive = true;
+            hhWatchDeadline = Date.now() + 10 * 60 * 1000;  // give the user 10 minutes to sign in
+            hhWatchTimer = setInterval(async () => {
+                if (Date.now() > hhWatchDeadline) { stopHHWatch(); return; }
+                try {
+                    const resp = await fetch(BASE + '/hh/status');
+                    if (!resp.ok) return;
+                    const st = await resp.json();
+                    if (st.has_refresh_token || st.grant === 'authorization_code') hhAuthContinue();
+                } catch (e) { /* transient network error — keep polling */ }
+            }, 3000);
+        }
+
+        // Fast path: the OAuth callback page broadcasts success on the same origin.
+        try {
+            new BroadcastChannel('arxivist-hh-auth').onmessage = (ev) => {
+                if (ev.data && ev.data.type === 'hh-connected') hhAuthContinue();
+            };
+        } catch (e) { /* BroadcastChannel unsupported — polling still covers it */ }
 
         // ===== Sidebar refresh =====
 

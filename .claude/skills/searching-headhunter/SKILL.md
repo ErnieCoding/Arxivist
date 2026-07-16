@@ -6,7 +6,9 @@ description: Searches HeadHunter (hh.ru) for vacancies, employers, HR data, skil
 # Searching HeadHunter
 
 > **Note:** HH API calls now use native MCP tools — no call_api needed.
-> Auth (HH_ACCESS_TOKEN if set), User-Agent, and retry on 429 are handled automatically.
+> Auth is fully automatic: an application token is minted from HH_CLIENT_ID/HH_CLIENT_SECRET
+> (covers vacancy/employer search), a user token is obtained via /hh/authorize (covers resumes).
+> User-Agent, token refresh, and retry on 429/403 are handled in code.
 
 ## Available MCP tools
 

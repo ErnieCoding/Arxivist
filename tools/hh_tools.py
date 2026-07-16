@@ -1,11 +1,16 @@
 """
 HeadHunter API MCP tools — typed, deterministic wrappers around api.hh.ru.
 
-Public endpoints (vacancy search, employers, reference data) work without auth.
-Resume search and candidate contacts require HH_ACCESS_TOKEN (OAuth token from
-a registered HH application at https://dev.hh.ru/).
+Auth model (HH tightened their API — verified live 2026-07):
+  - Truly public (no token): /areas, /dictionaries, /professional_roles.
+  - Vacancy/employer search returns 403 without a token. A client_credentials
+    APPLICATION token suffices — hh_auth auto-mints it from HH_CLIENT_ID +
+    HH_CLIENT_SECRET, and _get() re-mints once on 403 (self-heal).
+  - Resume search additionally needs a USER token (one-time browser OAuth via
+    /hh/authorize) AND a paid employer CV-database subscription.
 
-Rate limits: ~10 req/sec without auth, higher with auth. Built-in retry on 429.
+Tokens are read fresh from tools/hh_auth.py on every call, so a token obtained
+mid-session is picked up without a restart. Built-in retry on 429.
 """
 
 import json
@@ -66,6 +71,20 @@ def _get(path: str, params: dict | None = None, timeout: int = 30) -> dict:
                 pass
             log.error("HH API HTTP %d %s: %s", e.code, path, err)
             if e.code == 403:
+                # Self-heal: if we're using an application (client_credentials)
+                # token, it may have expired — re-mint once and retry. Never do
+                # this for a user token (a 403 there means missing CV access, and
+                # re-minting would clobber the user token in config/hh_token.json).
+                tok = hh_auth._read()
+                using_app_token = (
+                    tok.get("grant") == "client_credentials"
+                    and not tok.get("refresh_token")
+                )
+                if attempt == 0 and using_app_token:
+                    minted = hh_auth.get_app_token()
+                    if minted.get("ok") and minted["data"].get("access_token") != tok.get("access_token"):
+                        log.info("HH app token re-minted after 403; retrying %s", path)
+                        continue
                 return {"ok": False, "error": (
                     "HTTP 403 (forbidden). HeadHunter requires an access token for search "
                     "endpoints. Set HH_CLIENT_ID and HH_CLIENT_SECRET in .env (an application "
@@ -507,7 +526,8 @@ async def search_hh_resumes(args: dict) -> dict:
         return {"content": [{"type": "text", "text": (
             "AUTHORIZATION_REQUIRED: Resume search needs a one-time HeadHunter sign-in. "
             f"Present this login link to the user (in their language), e.g. [Войти через HeadHunter]({link}). "
-            "After they sign in once, resume search will work. Do not retry until they have signed in."
+            "Tell them that after signing in the search will continue automatically — they don't need "
+            "to write anything. Do not retry until they have signed in."
         )}]}
 
     params: dict = {

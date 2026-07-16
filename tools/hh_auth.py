@@ -16,6 +16,7 @@ HH OAuth grant types:
 import json
 import logging
 import os
+import secrets
 import time
 import urllib.error
 import urllib.parse
@@ -26,6 +27,10 @@ log = logging.getLogger(__name__)
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_DIR = os.path.dirname(_THIS_DIR)
 TOKEN_FILE = os.path.join(_PROJECT_DIR, "config", "hh_token.json")
+# CSRF state for the OAuth flow. File-based (not in-memory) because the
+# /hh/authorize and /hh/callback requests may hit different gunicorn workers.
+STATE_FILE = os.path.join(_PROJECT_DIR, "config", "hh_oauth_state.json")
+_STATE_TTL = 600  # seconds a pending authorize state stays valid
 
 HH_TOKEN_URL = "https://hh.ru/oauth/token"
 HH_AUTHORIZE_URL = "https://hh.ru/oauth/authorize"
@@ -88,6 +93,39 @@ def _read() -> dict:
         return {}
 
 
+def new_state() -> str:
+    """Mint and persist a one-time CSRF state for the authorize redirect."""
+    state = secrets.token_urlsafe(24)
+    try:
+        os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+        with open(STATE_FILE, "w") as f:
+            json.dump({"state": state, "ts": time.time()}, f)
+    except OSError as e:
+        log.error("Could not persist OAuth state: %s", e)
+    return state
+
+
+def consume_state(state: str) -> bool:
+    """Validate a callback's state against the stored one. One-shot: the
+    stored state is deleted on a successful match."""
+    if not state:
+        return False
+    try:
+        with open(STATE_FILE) as f:
+            saved = json.load(f)
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return False
+    if time.time() - float(saved.get("ts", 0)) > _STATE_TTL:
+        return False
+    if not secrets.compare_digest(str(saved.get("state", "")), state):
+        return False
+    try:
+        os.remove(STATE_FILE)
+    except OSError:
+        pass
+    return True
+
+
 def build_authorize_url(redirect_uri: str = "", state: str = "") -> str:
     """Build the HH authorization URL to send the user's browser to."""
     params = {
@@ -136,6 +174,13 @@ def get_app_token() -> dict:
         token["grant"] = "client_credentials"
         _save(token)
         return {"ok": True, "data": token}
+    # HH refuses to re-mint while the current app token is still alive
+    # ("app token refresh too early"). The existing token is still usable, so
+    # return it instead of surfacing a spurious error to callers.
+    if "too early" in str(r.get("error", "")).lower():
+        existing = _read()
+        if existing.get("access_token") and existing.get("grant") == "client_credentials":
+            return {"ok": True, "data": existing}
     return r
 
 

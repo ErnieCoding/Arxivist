@@ -376,6 +376,7 @@ _STATUS_PHRASES = {
     "mcp__hh__get_hh_employer_details": ("Собираю данные о компании…", "Fetching company details…"),
     "mcp__hh__get_hh_reference":        ("Уточняю справочники…", "Loading reference data…"),
     "mcp__hh__search_hh_resumes":       ("Ищу резюме…", "Searching resumes…"),
+    "mcp__hh__get_hh_resume":           ("Изучаю резюме…", "Reading a resume…"),
     "mcp__dashboard__create_dashboard": ("Собираю дашборд…", "Building the dashboard…"),
     "mcp__dashboard__extract_text":     ("Извлекаю текст…", "Extracting text…"),
     "mcp__api__call_api":               ("Обращаюсь к внешнему сервису…", "Contacting an external service…"),
@@ -476,7 +477,8 @@ def _build_chat_options(session_id, active_dashboard_uuid, attached_files):
         "you to search the web and enrich the KB. Do NOT start web search automatically.\n\n"
         "2. HEADHUNTER: Use mcp__hh__* tools directly. No SKILL.md needed. If a tool reply starts "
         "with 'AUTHORIZATION_REQUIRED' or contains a sign-in link, present that link to the user as a "
-        "clickable markdown link (in their language) and STOP — do not retry. It is a one-time login.\n\n"
+        "clickable markdown link (in their language), tell them the search will continue automatically "
+        "after they sign in (no need to write anything), and STOP — do not retry. It is a one-time login.\n\n"
         "2a. CANDIDATES / RESUMES: search_hh_resumes returns a numbered list; present it cleanly with the "
         "resume links and ASK which candidates to save (never save automatically). When the user picks some, "
         "for each selected candidate: derive the resume_id from its URL (hh.ru/resume/<id>), optionally call "
@@ -840,14 +842,41 @@ def _hh_redirect_uri() -> str:
     return hh_auth.HH_REDIRECT_URI or url_for("hh_callback", _external=True)
 
 
+def _hh_page(title: str, body_html: str, status: int = 200, extra_script: str = ""):
+    """Small dark-themed page shell for the OAuth screens, matching the app UI."""
+    home = (SCRIPT_NAME or "") + "/"
+    html = f"""<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><title>{title}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  body {{ background:#0f1117; color:#e0e0e0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+         display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; }}
+  .card {{ background:#1a1d27; border:1px solid #2a2d3a; border-radius:14px; padding:2.2rem 2.6rem;
+          max-width:520px; text-align:center; box-shadow:0 8px 32px rgba(0,0,0,.35); }}
+  h2 {{ margin:0 0 .8rem; color:#fff; font-size:1.25rem; }}
+  p  {{ margin:.4rem 0; line-height:1.55; color:#b9c0d4; font-size:.92rem; }}
+  a  {{ color:#93b0ff; }}
+  .ok {{ color:#4ade80; font-size:2.2rem; display:block; margin-bottom:.6rem; }}
+  .err {{ color:#f87171; font-size:2.2rem; display:block; margin-bottom:.6rem; }}
+  .hint {{ color:#6b7288; font-size:.8rem; margin-top:1.1rem; }}
+</style></head>
+<body><div class="card">{body_html}
+<p class="hint"><a href="{home}">← Вернуться в Arxivist</a></p>
+</div>{extra_script}</body></html>"""
+    return html, status
+
+
 @app.route("/hh/authorize")
 def hh_authorize():
     if not hh_auth.HH_CLIENT_ID:
-        return (
-            "HH_CLIENT_ID is not configured. Set HH_CLIENT_ID and HH_CLIENT_SECRET "
-            "in .env, then restart.", 400,
+        return _hh_page(
+            "HeadHunter — не настроено",
+            "<span class='err'>✕</span><h2>Интеграция не настроена</h2>"
+            "<p>HH_CLIENT_ID / HH_CLIENT_SECRET не заданы в .env. Задайте их и перезапустите приложение.</p>",
+            status=400,
         )
-    return redirect(hh_auth.build_authorize_url(redirect_uri=_hh_redirect_uri()))
+    state = hh_auth.new_state()
+    return redirect(hh_auth.build_authorize_url(redirect_uri=_hh_redirect_uri(), state=state))
 
 
 @app.route("/hh/callback")
@@ -855,24 +884,56 @@ def hh_callback():
     error = request.args.get("error")
     if error:
         desc = request.args.get("error_description", "")
-        return f"<h2>HeadHunter authorization failed</h2><p>{error}: {desc}</p>", 400
+        return _hh_page(
+            "HeadHunter — ошибка",
+            f"<span class='err'>✕</span><h2>Авторизация не завершилась</h2><p>{error}: {desc}</p>"
+            "<p>Вернитесь в чат и попробуйте войти ещё раз по ссылке от ассистента.</p>",
+            status=400,
+        )
 
     code = request.args.get("code")
     if not code:
-        return "<h2>Missing authorization code</h2>", 400
+        return _hh_page(
+            "HeadHunter — ошибка",
+            "<span class='err'>✕</span><h2>Не получен код авторизации</h2>"
+            "<p>Похоже, страница открыта напрямую. Начните вход по ссылке от ассистента.</p>",
+            status=400,
+        )
+
+    # CSRF check: the state must match the one minted at /hh/authorize.
+    if not hh_auth.consume_state(request.args.get("state", "")):
+        return _hh_page(
+            "HeadHunter — ошибка",
+            "<span class='err'>✕</span><h2>Сессия авторизации устарела</h2>"
+            "<p>Ссылка входа была открыта повторно или истекла. Вернитесь в чат и начните вход заново.</p>",
+            status=400,
+        )
 
     result = hh_auth.exchange_code(code, redirect_uri=_hh_redirect_uri())
     if not result["ok"]:
-        return f"<h2>Token exchange failed</h2><pre>{result['error']}</pre>", 502
+        log.error("HH OAuth token exchange failed: %s", result["error"])
+        return _hh_page(
+            "HeadHunter — ошибка",
+            "<span class='err'>✕</span><h2>Не удалось обменять код на токен</h2>"
+            "<p>Попробуйте войти ещё раз. Если ошибка повторяется — проверьте, что Redirect URI "
+            "в настройках приложения на dev.hh.ru совпадает с адресом этой страницы.</p>",
+            status=502,
+        )
 
     log.info("HH OAuth: user token obtained and stored")
-    home = (SCRIPT_NAME or "") + "/"
-    return (
-        "<html><body style='font-family:sans-serif;max-width:600px;margin:3rem auto'>"
-        "<h2>✓ HeadHunter connected</h2>"
-        "<p>Access token stored. Resume/candidate search is now available to the agent.</p>"
-        f"<p><a href='{home}'>← Back to Arxivist</a></p>"
-        "</body></html>"
+    # Auto-return: notify the chat tab (same-origin BroadcastChannel) and close
+    # this tab. The chat page ALSO polls /hh/status as a fallback, so the flow
+    # continues even if this tab can't signal (different origin) or won't close.
+    script = """<script>
+  try { new BroadcastChannel('arxivist-hh-auth').postMessage({ type: 'hh-connected' }); } catch (e) {}
+  setTimeout(function () { window.close(); }, 1200);
+</script>"""
+    return _hh_page(
+        "HeadHunter подключён",
+        "<span class='ok'>✓</span><h2>HeadHunter подключён</h2>"
+        "<p>Поиск кандидатов и резюме теперь доступен ассистенту.</p>"
+        "<p>Эта вкладка закроется сама — диалог продолжится в чате автоматически.</p>",
+        extra_script=script,
     )
 
 

@@ -10,6 +10,10 @@ services:
     # container needs to reach it.
     ports:
       - "127.0.0.1:5050:5050"
+      # Also expose on :5000 so the HH OAuth callback registered as
+      # http://localhost:5000/hh/callback resolves during local testing.
+      # (Same container port; only the /hh/callback route is hit this way.)
+      - "127.0.0.1:5000:5050"
 
     # .env in the project root supplies secrets (ANTHROPIC_AUTH_TOKEN,
     # PROXY_AUTH_TOKEN, PROXY_STREAM_URL_TEMPLATE, etc.).
