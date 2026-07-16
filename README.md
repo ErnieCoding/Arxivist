@@ -1,8 +1,8 @@
 # Arxivist
 
-AI research assistant in a chat box. Search and download arXiv papers, summarize them, upload your own documents, and generate (or edit) self-contained HTML dashboards — all from a single conversational interface.
+An AI assistant in a chat box that has grown well beyond arXiv: research papers, document dashboards, a company knowledge graph, and a full HeadHunter recruiting workflow — candidate search driven by plain conversation or an attached vacancy description.
 
-Powered by the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-python) and Flask. The agent extends itself: when you mention a new database or API, it writes its own SKILL.md file to learn how to talk to it.
+Powered by the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-python) (agent loop + in-process MCP tool servers) and Flask. The agent extends itself at runtime: mention a new database or API, and it writes its own `SKILL.md` to learn how to talk to it.
 
 > **Developer documentation** — full module map, request flows, protocols, and extension guide: [docs/DEVELOPER.md](docs/DEVELOPER.md)
 
@@ -10,12 +10,59 @@ Powered by the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk
 
 ## Features
 
-- **arXiv search** — natural-language queries (any language) are translated and routed through the arXiv API with rate limiting and exponential backoff.
-- **Paper summarization** — structured markdown summaries from downloaded abstracts.
-- **File uploads** — attach PDF, DOCX, MD, or TXT files to chat messages. PDFs are parsed natively by Claude (figures, tables, layout).
-- **Dashboard generation** — turn any document, pasted text, or downloaded paper into a published, single-file HTML dashboard with cards, timelines, stats, and Chart.js charts.
-- **In-place dashboard editing** — say "make the cards rounded" or "add a section on risks" and the agent edits the live page without re-creating it.
-- **Self-extending skills** — provide an API's base URL and auth, and the agent writes a new `SKILL.md` so it can call that API on demand.
+### Research
+- **arXiv search & download** — natural-language queries in any language (auto-translated), rate-limited arXiv API client with exponential backoff.
+- **Paper summarization** — deterministic structured summaries produced by a direct API call (not the agent), so the format never drifts.
+
+### Documents & dashboards
+- **File uploads** — attach PDF / DOCX / MD / TXT (≤ 25 MB) to any chat message. PDFs are parsed natively by Claude (figures, tables, layout); DOCX tables are extracted as markdown.
+- **Dashboard generation** — turn any document or pasted text into a published, single-file HTML dashboard at a sharable URL.
+- **In-place dashboard editing** — "make the cards rounded", "add a risks section" — the agent edits the live page via anchored markers, same URL.
+
+### Knowledge base (ArangoDB graph)
+- **Query** — ask about a company/topic; the agent checks the knowledge base first and answers from it.
+- **Enrich** — web research (built-in WebSearch/WebFetch) → structured JSON → ingested into the graph. The `companies` database holds company intelligence.
+
+### HeadHunter (hh.ru) recruiting
+- **Vacancy / employer search** — positions, salaries, hiring trends, company profiles. Works out of the box with app credentials (token minted and refreshed automatically).
+- **Candidate / resume search** — by conversational criteria **or from an attached vacancy description**: the agent reads the document, distills role / region / experience / salary into a query, and returns a ranked list with resume links.
+- **Precise filters, used only when asked** — salary range, schedule (remote/…), employment type, education level, age, relocation, search activity, resume freshness, sort order. Soft criteria stay in the text query so filters never silently shrink the pool.
+- **One-time OAuth with auto-continue** — when resume search needs a sign-in, the agent posts a login link; after the user authorizes on hh.ru the callback tab closes itself and **the chat resumes the search automatically** (no manual "I'm back" message).
+- **Save candidates to the knowledge base** — the user picks candidates from the list ("save 1, 3 and 5"); each is stored in the `candidates` database as one document: structured profile + resume link. Nothing is saved without an explicit pick (resumes are personal data).
+
+### UX & infrastructure
+- **Live status streaming** — `/chat` streams SSE status phrases ("Ищу резюме…", "Собираю дашборд…") in the user's language while the agent works; the final answer contains results only, never internal mechanics.
+- **Sanitized rendering** — agent markdown goes through DOMPurify; external data (vacancy titles, resume fields) cannot inject HTML.
+- **Direct / Proxy toggle** — a header switch routes model traffic either straight to the Anthropic API or through an upstream proxy (persisted across restarts).
+- **Self-extending skills** — describe any REST API in chat and the agent writes a new skill for it, then calls it through a generic HTTP tool.
+
+---
+
+## Project structure
+
+```
+Arxivist/
+├── app.py                  # Flask app: routes, /chat SSE loop, agent options, HH OAuth
+├── arxiv_tools.py          # MCP server `arxiv` + per-request session state (_session)
+├── tools/
+│   ├── hh_tools.py         # MCP server `hh` — vacancies, employers, resumes (typed filters)
+│   ├── hh_auth.py          # HH OAuth2: app/user tokens, refresh, CSRF state
+│   ├── kb_tools.py         # MCP server `kb` — knowledge-graph query/ingest (JSON-only)
+│   ├── dashboard_tools.py  # MCP server `dashboard` — publish HTML, extract text
+│   └── call_api.py         # MCP server `api` — generic HTTP tool (no API specifics, by design)
+├── bridge/bridge.py        # Anthropic-API bridge: direct ↔ upstream-proxy modes, /mode switch
+├── dashboards_store.py     # dashboard registry (flock-protected, 2 workers)
+├── uploads_store.py        # upload validation + text extraction + meta.json
+├── text_extract.py         # DOCX (table-aware) / MD / TXT extraction; PDFs go to Claude natively
+├── templates/index.html    # single-file frontend: SSE reader, OAuth auto-continue, mode toggle
+├── .claude/skills/         # agent skills (orchestration + self-extension), seeded into a volume
+├── docs/DEVELOPER.md       # developer guide (modules, flows, protocols, extension)
+├── design-system.md        # dashboard design system the agent must follow
+├── Dockerfile / docker-compose.yml / entrypoint.sh / gunicorn.conf.py
+└── config/                 # runtime state (gitignored): HH tokens, OAuth state, bridge mode
+```
+
+Note: `arxiv_tools.py` lives at the root (not in `tools/`) because it owns the module-level session state imported by `app.py`; the name also avoids a package/module collision with `tools/`.
 
 ---
 
@@ -23,185 +70,94 @@ Powered by the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk
 
 - Python 3.11+
 - Docker + Docker Compose (for the production-like setup)
-- An Anthropic API key
+- An Anthropic API key (or upstream-proxy credentials)
+- Optional: HeadHunter app credentials (dev.hh.ru), knowledge-base API key
 
 ---
 
 ## Setup
 
-1. Clone the repo and `cd` into it.
-2. Create a `.env` file at the repo root:
+1. Clone the repo and create `.env` at the root:
 
    ```env
+   # Model access — direct mode
    ANTHROPIC_API_KEY=sk-ant-...
+   ANTHROPIC_BASE_URL=http://127.0.0.1:9999      # always the local bridge
+
+   # Model access — proxy mode (optional; enables the header toggle)
+   PROXY_UPSTREAM_URL=https://.../proxy/anthropic
+   PROXY_AUTH_TOKEN=...
+   PROXY_STREAM_URL_TEMPLATE=https://.../proxy/stream/{task_id}
+
+   # Deployed behind nginx at a sub-path
+   APP_BASE=/arxivist
+
+   # Knowledge base (ArangoDB graph)
+   KNOWLEDGE_BASE_URL=http://neo.rndl.ru:5001
+   KNOWLEDGE_BASE_API_KEY=...
+
+   # HeadHunter (register an app at https://dev.hh.ru)
+   HH_CLIENT_ID=...
+   HH_CLIENT_SECRET=...
+   # Must EXACTLY match a Redirect URI registered in the HH app.
+   # For local testing:  http://localhost:5000/hh/callback
+   # For production: replace with your public URL, e.g. https://<host>/arxivist/hh/callback
+   HH_REDIRECT_URI=http://localhost:5000/hh/callback
    ```
 
-3. (Optional) For local dev outside Docker, create a virtualenv and install dependencies:
+2. Run:
 
    ```bash
-   python -m venv venv
-   source venv/bin/activate
-   pip install -r requirements.txt
+   # Production-like (bridge + gunicorn in Docker)
+   docker compose up --build -d
+   docker compose logs -f arxivist
+
+   # Local dev (Flask dev server on :5000; bridge must run separately if needed)
+   python app.py
    ```
 
----
+   The container binds to `127.0.0.1:5050` (for nginx) **and** `127.0.0.1:5000` (so the locally registered HH OAuth callback resolves).
 
-## Running
+### HeadHunter access levels
 
-### Local development
+| Capability | Needs |
+|---|---|
+| Region/role/skill reference data | nothing |
+| Vacancy & employer search | `HH_CLIENT_ID` + `HH_CLIENT_SECRET` (app token is minted and re-minted automatically) |
+| Resume / candidate search | one-time user sign-in via the link the agent posts (token auto-refreshes, ~14-day cycle) + a paid CV-database subscription on the HH employer account |
 
-Runs the Flask dev server on `http://127.0.0.1:5000`:
-
-```bash
-python app.py
-```
-
-Open `http://127.0.0.1:5000/` in a browser.
-
-### Production (Docker, behind nginx)
-
-The Docker image runs gunicorn on `127.0.0.1:5050`. Intended to sit behind a host nginx that proxies `/arxivist/` to it.
-
-```bash
-docker compose up --build -d
-docker compose logs -f arxivist
-```
-
-The `APP_BASE=/arxivist` environment variable (set in `docker-compose.yml`) is passed to the frontend so client-side fetch URLs are correct. Change it if you deploy at a different sub-path.
-
-If you're putting nginx in front of it, make sure `client_max_body_size` is at least 25 MB so file uploads aren't rejected.
+The OAuth flow is CSRF-protected and fully automated end-to-end: link in chat → sign in on hh.ru → callback tab closes itself → the chat continues the search on its own.
 
 ---
 
-## Use cases
+## Usage examples
 
-The chat box accepts any natural-language request. The agent matches your wording to one of its skills and runs the corresponding workflow. Examples:
-
-### 1. Search and download papers
-
-> "Find me 5 recent papers on diffusion models by LeCun."
-
-The agent translates non-English queries to English, hits arXiv, downloads the PDFs to `downloads/`, and returns a structured summary of each one (title, authors, category, date, abstract overview). Downloaded files appear in the **Downloaded Papers** sidebar.
-
-### 2. Summarize existing downloads
-
-> "Summarize the papers I have."
-
-The agent looks at what's in `downloads/` and produces fresh summaries from the metadata.
-
-### 3. Upload a document and ask questions
-
-Click the **+** button next to the message box (or drag a file onto the textarea) to attach PDF/DOCX/MD/TXT files. They are stored under `uploads/<file_id>/`.
-
-> "What are the three biggest takeaways from this report?"
-
-For PDFs, the agent uses Claude's native PDF reading (sees images, tables, and layout). For DOCX, the agent reads pre-extracted markdown text with tables preserved.
-
-### 4. Generate a dashboard from a document
-
-> "Build a dashboard from this PDF."
-
-The agent:
-1. Reads the source (upload, pasted text, or downloaded arXiv PDFs).
-2. Plans the structure as JSON in its reasoning (overview / cards / timeline / metrics / charts / etc.).
-3. Renders a single self-contained HTML file following [`design-system.md`](design-system.md) — palette via CSS variables, predictable class/ID names, anchor-marker comments.
-4. Publishes it via the `create_dashboard` MCP tool, which mints a UUID and writes to `dashboards/<uuid>/index.html`.
-5. Replies with a link like `[Open the dashboard](/arxivist/d/<uuid>)`.
-
-The dashboard opens at its own URL and appears in the **Dashboards** sidebar (which lists every dashboard ever created, newest first). All visible text — titles, body copy, chart labels — is rendered in the source document's language.
-
-You can also paste raw text into the chat box (no file needed) and ask for a dashboard from it.
-
-### 5. Chain arXiv search → dashboard
-
-> "Find three recent papers on retrieval-augmented generation and make a dashboard comparing them."
-
-The agent runs `searching-arxiv` first, then `creating-dashboards` over the downloaded PDFs.
-
-### 6. Edit a dashboard
-
-Once a dashboard exists, the chat session "remembers" it (server-side, keyed by a `session_id` minted in your browser's `localStorage`).
-
-> "Make the cards rounded."
-> "Add a section on risks."
-> "Remove the timeline and recolor the accent to green."
-
-The agent reads the existing HTML, classifies the change (CSS / HTML / JS), and applies precise edits against the documented anchor markers. The URL stays the same — refresh to see changes.
-
-### 7. Add a new database or API
-
-> "We use Chroma at http://localhost:8000. Auth header is `X-API-Key`, env var `CHROMA_KEY`. Endpoint POST /api/v1/add takes {documents, embeddings}."
-
-The agent uses its `creating-skills` skill to write a new `SKILL.md` describing this API, then immediately uses it to fulfill your request. The skill persists in the `arxivist_skills` Docker volume across rebuilds.
+| You say | What happens |
+|---|---|
+| «Найди свежие статьи про diffusion models» | arXiv search → PDFs downloaded → structured summaries |
+| *(attach report.pdf)* «Сделай дашборд по этому отчёту» | native PDF read → published dashboard link |
+| «Сделай карточки круглее» | in-place edit of the same dashboard |
+| «Что мы знаем о компании X?» | knowledge-base query first; offers web enrichment if empty |
+| «Найди вакансии Python в Москве, какая вилка?» | HH vacancy search + salary stats |
+| *(attach vacancy.docx)* «Подбери кандидатов под эту вакансию» | reads the doc → distills criteria → ranked resume list with links |
+| «Только удалёнка и активно ищущие, до 400к» | re-search with `schedule=remote`, `job_search_status=active_search`, `salary_to=400000` |
+| «Сохрани кандидатов 1, 3 и 5» | enriches each resume → stores profile + resume link in the `candidates` knowledge base |
+| «Подключись к базе Bitrix24: вот endpoint и токен…» | the agent writes a new SKILL.md and starts calling that API |
 
 ---
 
-## Project layout
+## Deployment notes
 
-```
-.
-├── app.py                       # Flask app + agent loops + new routes
-├── tools.py                     # arxiv MCP server (search/download/list)
-├── tools/
-│   ├── call_api.py              # generic HTTP MCP tool
-│   └── dashboard_tools.py       # create_dashboard, extract_text
-├── text_extract.py              # docx/md/txt extraction helpers
-├── uploads_store.py             # upload save + meta.json
-├── dashboards_store.py          # registry with fcntl.flock
-├── design-system.md             # palette, naming, markers, HTML skeleton
-├── templates/index.html         # frontend (chat + sidebars + uploads)
-├── .claude/skills/              # skill instructions read by the agent
-│   ├── searching-arxiv/
-│   ├── summarizing-papers/
-│   ├── creating-dashboards/
-│   ├── editing-dashboards/
-│   ├── reading-uploads/
-│   └── creating-skills/
-├── uploads/                     # user uploads (Docker named volume)
-├── dashboards/                  # generated dashboards + registry.json
-├── downloads/                   # downloaded arXiv PDFs (Docker volume)
-├── Dockerfile
-├── docker-compose.yml
-├── gunicorn.conf.py
-└── requirements.txt
-```
+- Host nginx: `location /arxivist/ { proxy_pass http://127.0.0.1:5050/; proxy_buffering off; client_max_body_size 25m; }` — `proxy_buffering off` is required for `/chat` SSE.
+- `APP_BASE` must match the nginx sub-path; client JS builds URLs from it.
+- Before production: change `HH_REDIRECT_URI` from localhost to the public callback URL (and register it in the HH app), or authorization will silently break.
+- Concurrency model: 2 sync gunicorn workers, one request each — session state is module-level and **not thread-safe**; don't add threads/async workers without refactoring it (see [docs/DEVELOPER.md §10](docs/DEVELOPER.md)).
+- Runtime secrets live in `config/` (gitignored): HH tokens, OAuth state, bridge mode.
 
 ---
 
-## API endpoints
+## Documentation
 
-| Method | Path             | Purpose |
-|--------|------------------|---------|
-| GET    | `/`              | Serve the chat UI. |
-| POST   | `/search`        | Structured paper search + summary pipeline. |
-| POST   | `/chat`          | Open-ended agent loop. Accepts `{message, history, session_id, attached_file_ids}`. |
-| POST   | `/upload`        | Multipart file upload. Returns `{files: [meta...], errors: [...]}`. |
-| GET    | `/files`         | List downloaded arXiv PDFs. |
-| GET    | `/d/<uuid>`      | Serve a generated dashboard's HTML. |
-| GET    | `/dashboards`    | List all registered dashboards, newest first. |
-
----
-
-## Configuration
-
-| Env var              | Purpose                                                   | Default       |
-|----------------------|-----------------------------------------------------------|---------------|
-| `ANTHROPIC_API_KEY`  | Required — your Claude API key.                           | (none)        |
-| `APP_BASE`           | Sub-path the app is served under (for reverse-proxy).     | `""` (root)   |
-
----
-
-## Limitations
-
-- Two gunicorn sync workers, one request per worker — no concurrent requests from the same worker. Sufficient for personal/small-team use; not multi-tenant SaaS.
-- DOCX image extraction not implemented; figures inside `.docx` files aren't surfaced to the agent in v1. Convert to PDF for image fidelity.
-- Legacy `.doc` is rejected — convert to `.docx`, `.pdf`, or `.txt`.
-- Uploaded PDFs > 20 pages: the agent reads them in `pages` ranges, which costs more tokens and adds turns.
-- `fcntl.flock` is POSIX-only (production container is Linux). Local Windows dev will degrade.
-- No CSP currently on dashboard pages — dashboards are session-scoped UUIDs with unguessable paths, but the route is public.
-
----
-
-## License
-
-No license file is bundled. Use, fork, and adapt freely for your own research workflows.
+- [docs/DEVELOPER.md](docs/DEVELOPER.md) — architecture, module map, request flows, HTTP API, MCP tools, extension guide, known pitfalls.
+- `CLAUDE.md` — working notes for AI-assisted development in this repo.
+- `design-system.md` — the dashboard design contract the agent follows.

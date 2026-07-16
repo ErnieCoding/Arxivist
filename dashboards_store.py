@@ -134,17 +134,6 @@ def get_active(session_id: str) -> str | None:
         return sess.get("active")
 
 
-def set_active(session_id: str, dashboard_uuid: str) -> None:
-    """Explicitly mark a dashboard as the active one for a session."""
-    with _locked():
-        data = _read_registry()
-        if dashboard_uuid not in data["dashboards"]:
-            raise KeyError(f"Unknown dashboard: {dashboard_uuid}")
-        data["sessions"].setdefault(session_id, {"active": None, "created": []})
-        data["sessions"][session_id]["active"] = dashboard_uuid
-        _write_registry(data)
-
-
 def list_all() -> list[dict]:
     """
     Return all registered dashboards as a list of

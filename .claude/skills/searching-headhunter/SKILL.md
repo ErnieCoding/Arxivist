@@ -47,6 +47,12 @@ Use `mcp__hh__get_hh_reference(type="areas", filter="<city>")` for other cities.
 
 **"Найди кандидатов с критериями" (resume search + save):**
 1. `search_hh_resumes(text="<роль/навыки>", area=<code>, experience=<level>)`.
+   Extra filters exist (`salary_from/to`, `schedule`, `employment`, `education_level`,
+   `age_from/to`, `relocation` (needs `area`), `job_search_status`, `period`, `label`, `order_by`) —
+   **set a filter ONLY when the user or their vacancy document explicitly requires it.**
+   Soft criteria (skills, tools, domains) go into `text`, not filters: every extra filter
+   silently shrinks the candidate pool. A vacancy doc saying "Москва, гибрид, от 350к" maps to
+   `area=1, salary_from=350000` — but NOT schedule (гибрид ≠ строго fullDay/remote).
 2. Present the results to the user as a clean numbered list: role, region, experience, salary,
    and the **resume link** for each. Then ASK which candidates to save — never save automatically.
 3. When the user picks candidates (e.g. "сохрани 1, 3 и 5"):

@@ -65,7 +65,7 @@ Arxivist — веб-приложение «AI-ассистент в чате»: 
 | `_build_chat_options()` | системный промпт (правила Output style / Decision rules) + 5 MCP-серверов + allowed_tools + SESSION CONTEXT (session_id, активный дашборд, приложенные файлы) |
 | `run_chat_stream()` | async-генератор: yield `{"type":"status"}` на каждый tool call, `{"type":"final"}` — последний текст-без-инструментов |
 | `/chat` | sync-обёртка: свой event loop на запрос (без потоков!), SSE-ответ, выбор ответа: дашборд > саммари статей > финальный текст |
-| `/hh/authorize, /hh/callback, /hh/status, /hh/app-token` | OAuth-флоу HH (см. §5.3) |
+| `/hh/authorize, /hh/callback, /hh/status` | OAuth-флоу HH (см. §5.3) |
 | `/api/proxy-mode` | прокси к `POST/GET :9999/mode` бриджа |
 | прочее | `/`, `/search`, `/files`, `/upload`, `/d/<uuid>`, `/dashboards` |
 
@@ -86,6 +86,7 @@ Arxivist — веб-приложение «AI-ассистент в чате»: 
 ### tools/hh_tools.py — MCP-сервер `hh`
 - `_headers()` — Bearer-токен свежим на каждый вызов; `_get()` — retry 429, **self-heal 403**: если использовался app-токен — перевыпустить и повторить один раз (user-токен никогда не затирается).
 - Инструменты: `search_hh_vacancies`, `get_hh_vacancy`, `search_hh_employers`, `get_hh_employer_details`, `get_hh_reference` (areas/professional_roles/dictionaries/skills), `search_hh_resumes`, `get_hh_resume`.
+- `search_hh_resumes` — расширенные опциональные фильтры (проверены живьём против api.hh.ru): `salary_from/to` (+авто `currency=RUR`), `schedule`, `employment`, `education_level`, `age_from/to`, `relocation` (требует `area` — без него фильтр снимается с заметкой в выдаче), `job_search_status`, `period`, `label`, `order_by`. Конвенция: фильтр ставится ТОЛЬКО при явном требовании пользователя/документа; мягкие критерии — в `text` (закреплено в описании инструмента и SKILL.md).
 - `search_hh_resumes` без user-токена возвращает `AUTHORIZATION_REQUIRED` + markdown-ссылку на `/hh/authorize`; агент обязан показать её и остановиться (правило в системном промпте).
 - Матрица доступа HH (проверено живьём): `/areas`, `/dictionaries`, `/professional_roles` — публичные; `/vacancies*`, `/employers*` — нужен любой токен (app достаточно); `/resumes*` — только user-токен + платная подписка на базу резюме.
 
@@ -171,7 +172,6 @@ POST /chat {message, history, session_id, attached_file_ids}
 | `GET /hh/authorize` | старт OAuth (мятет state) | 302 на hh.ru |
 | `GET /hh/callback` | обмен кода на токен (CSRF-проверка) | HTML-страница с авто-закрытием |
 | `GET /hh/status` | статус токена | JSON `{configured, grant, has_refresh_token, expires_in_seconds, …}` |
-| `POST /hh/app-token` | принудительный app-токен | JSON |
 
 Примеры:
 ```bash

@@ -702,7 +702,7 @@ def chat():
                 "elapsed_seconds": round(elapsed, 2),
             })
 
-        except Exception as e:
+        except Exception:
             elapsed = time.time() - start
             log.exception("Chat failed after %.2fs", elapsed)
             session = get_session()
@@ -940,15 +940,6 @@ def hh_callback():
 @app.route("/hh/status")
 def hh_status():
     return jsonify(hh_auth.token_status())
-
-
-@app.route("/hh/app-token", methods=["POST"])
-def hh_app_token():
-    """Obtain a client_credentials application token (no user interaction)."""
-    result = hh_auth.get_app_token()
-    if not result["ok"]:
-        return jsonify({"error": result["error"]}), 502
-    return jsonify({"ok": True, "status": hh_auth.token_status()})
 
 
 if __name__ == "__main__":

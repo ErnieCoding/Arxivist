@@ -110,16 +110,3 @@ def read_meta(file_id: str) -> Optional[dict]:
         return None
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
-
-
-def paths_for(file_id: str) -> dict:
-    """Return canonical paths for a stored upload."""
-    base = os.path.join(UPLOADS_DIR, file_id)
-    meta = read_meta(file_id) or {}
-    ext = meta.get("ext", "")
-    return {
-        "dir": base,
-        "original": os.path.join(base, f"original{ext}") if ext else None,
-        "text_md": os.path.join(base, "text.md"),
-        "meta": os.path.join(base, "meta.json"),
-    }

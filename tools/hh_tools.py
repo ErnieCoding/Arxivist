@@ -16,6 +16,7 @@ mid-session is picked up without a restart. Built-in retry on 429.
 import json
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -250,7 +251,6 @@ async def get_hh_vacancy(args: dict) -> dict:
 
     # Strip HTML from description
     desc = v.get("description", "")
-    import re
     desc_clean = re.sub(r"<[^>]+>", " ", desc).strip()
     desc_clean = re.sub(r" +", " ", desc_clean)[:1500]
 
@@ -357,7 +357,6 @@ async def get_hh_employer_details(args: dict) -> dict:
     industries = ", ".join(i.get("name", "") for i in (e.get("industries") or []))
     open_vacancies = e.get("open_vacancies_count", "?")
 
-    import re
     desc = re.sub(r"<[^>]+>", " ", e.get("description") or "").strip()
     desc = re.sub(r" +", " ", desc)[:1000]
 
@@ -498,7 +497,10 @@ async def get_hh_reference(args: dict) -> dict:
     (
         "Search HeadHunter resumes / candidates. Requires a user OAuth token AND a paid employer "
         "CV-database subscription. If authorization is missing, this returns an 'authorization required' "
-        "message containing a login link — relay that link to the user; do not retry."
+        "message containing a login link — relay that link to the user; do not retry. "
+        "IMPORTANT: set ONLY the filters the user (or their vacancy description) explicitly requires "
+        "and leave everything else unset — every extra filter silently shrinks the candidate pool. "
+        "Soft criteria (specific skills, tools, domains) belong in `text`, not in filters."
     ),
     {
         "type": "object",
@@ -511,6 +513,50 @@ async def get_hh_reference(args: dict) -> dict:
                 "description": "Candidate experience level.",
             },
             "salary_from": {"type": "integer", "description": "Minimum expected salary."},
+            "salary_to": {"type": "integer", "description": "Maximum expected salary."},
+            "currency": {
+                "type": "string",
+                "enum": ["RUR", "USD", "EUR"],
+                "description": "Salary currency. Defaults to RUR automatically when a salary filter is set.",
+            },
+            "schedule": {
+                "type": "string",
+                "enum": ["fullDay", "shift", "flexible", "remote", "flyInFlyOut"],
+                "description": "Desired work schedule. Use ONLY if explicitly required (e.g. 'только удалённо' → remote).",
+            },
+            "employment": {
+                "type": "string",
+                "enum": ["full", "part", "project", "volunteer", "probation"],
+                "description": "Employment type. Use ONLY if explicitly required.",
+            },
+            "education_level": {
+                "type": "string",
+                "enum": ["secondary", "special_secondary", "unfinished_higher", "higher", "bachelor", "master", "candidate", "doctor"],
+                "description": "Minimum education level. Use ONLY if the vacancy explicitly demands it.",
+            },
+            "age_from": {"type": "integer", "description": "Minimum candidate age. Use ONLY if explicitly requested."},
+            "age_to": {"type": "integer", "description": "Maximum candidate age. Use ONLY if explicitly requested."},
+            "relocation": {
+                "type": "string",
+                "enum": ["living_or_relocation", "living", "living_but_relocation", "relocation"],
+                "description": "Relocation attitude relative to `area` (REQUIRES area to be set): living = only locals, relocation = only willing to relocate, living_or_relocation = both.",
+            },
+            "job_search_status": {
+                "type": "string",
+                "enum": ["active_search", "looking_for_offers"],
+                "description": "Candidate's search activity. active_search = actively looking. Use when the user wants candidates ready to move quickly.",
+            },
+            "period": {"type": "integer", "description": "Only resumes updated within the last N days. Use when freshness matters."},
+            "label": {
+                "type": "string",
+                "enum": ["only_with_salary", "only_with_photo", "only_with_age"],
+                "description": "Require a filled-in field, e.g. only_with_salary = only resumes that state expected salary.",
+            },
+            "order_by": {
+                "type": "string",
+                "enum": ["relevance", "salary_desc", "salary_asc", "publication_time"],
+                "description": "Sort order. Default: relevance.",
+            },
             "per_page": {"type": "integer", "description": "Results per page (max 100, default 20)."},
             "page": {"type": "integer", "description": "Page number (0-indexed)."},
         },
@@ -534,9 +580,27 @@ async def search_hh_resumes(args: dict) -> dict:
         "per_page": min(int(args.get("per_page") or 20), 100),
         "page": int(args.get("page") or 0),
     }
-    for k_src, k_dst in (("text", "text"), ("area", "area"), ("experience", "experience"), ("salary_from", "salary_from")):
-        if args.get(k_src) is not None:
-            params[k_dst] = args[k_src]
+    # Optional filters — passed through ONLY when the model set them explicitly.
+    # Param names and enum values verified live against api.hh.ru (2026-07).
+    _PASSTHROUGH = (
+        "text", "area", "experience", "salary_from", "salary_to", "currency",
+        "schedule", "employment", "education_level", "age_from", "age_to",
+        "relocation", "job_search_status", "period", "label", "order_by",
+    )
+    for k in _PASSTHROUGH:
+        if args.get(k) is not None:
+            params[k] = args[k]
+
+    notes = []
+    # HH requires a currency alongside salary bounds; default to RUR.
+    if ("salary_from" in params or "salary_to" in params) and "currency" not in params:
+        params["currency"] = "RUR"
+    # HH rejects `relocation` without `area` (verified: HTTP 400). Drop it
+    # rather than failing the whole search, and say so in the result.
+    if "relocation" in params and "area" not in params:
+        params.pop("relocation")
+        notes.append("Фильтр по релокации не применён: для него нужен регион (area). "
+                     "Уточни регион и повтори, если фильтр важен.")
 
     log.info("HH resume search: %s", params)
     result = _get("/resumes", params=params)
@@ -557,12 +621,16 @@ async def search_hh_resumes(args: dict) -> dict:
     items = data.get("items", [])
     found = data.get("found", 0)
     if not items:
-        return {"content": [{"type": "text", "text": "Резюме по заданным критериям не найдены."}]}
+        hint = (" Попробуй ослабить фильтры (schedule/education_level/age/salary) — "
+                "жёсткие фильтры часто обнуляют выдачу.") if len(params) > 4 else ""
+        empty_msg = " ".join(notes + ["Резюме по заданным критериям не найдены." + hint])
+        return {"content": [{"type": "text", "text": empty_msg}]}
 
     # Numbered list so the user can pick which candidates to save ("save #1, #3").
     # Each entry carries the resume link (user-facing) — the agent can derive the
     # resume_id from that URL later when saving to the knowledge base.
     lines = [f"Найдено резюме: {found} (показано {len(items)}).\n"]
+    lines[:0] = notes
     for i, r in enumerate(items, 1):
         title = r.get("title", "—")
         area = (r.get("area") or {}).get("name", "?")
@@ -658,7 +726,7 @@ async def get_hh_resume(args: dict) -> dict:
 
 hh_server = create_sdk_mcp_server(
     name="hh",
-    version="1.1.0",
+    version="1.2.0",
     tools=[
         search_hh_vacancies,
         get_hh_vacancy,
