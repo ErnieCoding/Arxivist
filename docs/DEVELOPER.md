@@ -54,6 +54,18 @@ Arxivist — веб-приложение «AI-ассистент в чате»: 
 
 ## 4. Карта модулей
 
+### agent_pipeline.py — ЕДИНЫЙ агентский пайплайн
+Извлечён из app.py, чтобы чат и API никогда не разъезжались. Содержит: статус-фразы + `detect_lang`, `build_chat_prompt`, `build_chat_options` (системный промпт + 5 MCP-серверов + allowed_tools), `run_chat_stream`, `resolve_attached_files`, `summarize_papers`, `run_search_pipeline` (arXiv: агент-фаза + саммари, никогда не бросает) и главный **`pipeline_events(message, history, session_id, attached_file_ids)`** — sync-генератор событий `{"type":"status"|"result",…}`. Три потребителя: `/chat` (оборачивает в SSE), `job_runner.py` (пишет в файлы джобы), `/api/v1/arxiv/search`.
+
+### api_v1.py — blueprint `/api/v1` (бэкенд-модуль)
+Все внешние API-эндпоинты + `before_request`-хук аутентификации по ключу (`X-API-Key` / `Authorization: Bearer`) против `tools/api_keys.py`. Открыты без ключа только `/docs`, `/openapi.yaml`, `/health`. Конверт ошибок `{"error":{code,message,…}}`; 403 `hh_user_authorization_required` несёт `authorize_url`. Опциональный CORS через env `API_CORS_ORIGINS`. Типизированные HH-роуты зовут `hh_tools._get()` (сырой JSON api.hh.ru), KB-роуты — `kb_tools._request()/_poll_task()`; `POST /candidates/save` — детерминированный конвейер резюме→документ→база.
+
+### jobs_store.py + job_runner.py — асинхронные агентские джобы
+202+poll без Celery/Redis: `jobs/<job_id>/{request.json,status.json,events.ndjson,runner.log}`. `create_job` → Popen `job_runner.py <id>` (отдельный процесс — свой `_session`, воркер gunicorn не занят). Состояния `queued→running→succeeded|failed|canceled`; RMW статуса под per-job flock; self-heal мёртвых раннеров (проверка pid при чтении); отмена SIGTERM'ом; TTL-уборка (JOB_TTL_DAYS=7); лимит ёмкости `active_count()` против `MAX_CONCURRENT_AGENT_JOBS` (429). Watchdog в раннере: `JOB_TIMEOUT` (900с) через SIGALRM.
+
+### tools/api_keys.py + scripts/apikeys.py — API-ключи
+Формат `axv_<id8hex>_<secret ~256бит>`; в `config/api_keys.json` только sha256 всего ключа (утёкший бэкап config/ не раскрывает ключи). Валидация — чтение файла на каждый запрос (как hh_auth) + `hmac.compare_digest`; записи под flock (как dashboards_store). Отзыв действует немедленно, БЕЗ рестарта (рестарт убил бы минутные джобы). `last_used_at` обновляется с троттлингом 5 мин. CLI: `create --label` / `list` / `revoke <id>`.
+
 ### app.py — HTTP-слой и оркестрация агента
 | Что | Детали |
 |---|---|
@@ -157,6 +169,22 @@ POST /chat {message, history, session_id, attached_file_ids}
 ### 5.5 Дашборды и загрузки
 `POST /upload` → `uploads/<file_id>/` → id уходит в `/chat` → сервер кладёт read_path/parse_mode в SESSION CONTEXT системного промпта → агент читает (PDF — встроенным `Read`) → `create_dashboard` → `/d/<uuid>`. Редактирование — `Edit` по якорям-маркерам без смены UUID (скилл `editing-dashboards`).
 
+### 5.6 API-модуль: агентская джоба (202 + poll)
+```
+POST /api/v1/agent/jobs {message, history?, session_id?, attached_file_ids?}
+ ├─ auth: X-API-Key → tools/api_keys.verify_key
+ ├─ active_count() >= MAX_CONCURRENT_AGENT_JOBS → 429 + Retry-After
+ ├─ jobs_store.create_job() → Popen(job_runner.py <id>, start_new_session)
+ └─ 202 {job_id, poll}
+job_runner (отдельный процесс):
+ ├─ state=running(pid) → pipeline_events(...)  ← ТОТ ЖЕ код, что /chat
+ ├─ status-фразы → events.ndjson
+ └─ result → status.json (state=succeeded; cancel не перезаписывается)
+GET /api/v1/agent/jobs/{id} → {state, progress[], result{reply,files,…}, error}
+DELETE /api/v1/agent/jobs/{id} → SIGTERM раннеру + state=canceled
+```
+Клиентский цикл: 202 → poll каждые 2–5 c → `succeeded` → `result.reply` (markdown). Файл вакансии: сначала `POST /api/v1/files` → `file_id` → в `attached_file_ids`.
+
 ## 6. HTTP API
 
 | Метод/путь | Назначение | Ответ |
@@ -172,6 +200,18 @@ POST /chat {message, history, session_id, attached_file_ids}
 | `GET /hh/authorize` | старт OAuth (мятет state) | 302 на hh.ru |
 | `GET /hh/callback` | обмен кода на токен (CSRF-проверка) | HTML-страница с авто-закрытием |
 | `GET /hh/status` | статус токена | JSON `{configured, grant, has_refresh_token, expires_in_seconds, …}` |
+
+**API-модуль `/api/v1` (по API-ключу; полный контракт — `docs/openapi.yaml`, Swagger UI — `GET /api/v1/docs`):**
+
+| Метод/путь | Назначение |
+|---|---|
+| `POST /api/v1/agent/jobs` → `GET/DELETE /api/v1/agent/jobs/{id}` | асинхронные агентские задачи (полный флоу) |
+| `POST /api/v1/files`, `GET /api/v1/files/{name}` | загрузка документов / скачивание PDF |
+| `GET /api/v1/hh/vacancies[/{id}]`, `/hh/employers[/{id}]`, `/hh/resumes[/{id}]`, `/hh/reference/{type}`, `/hh/auth/status` | типизированный HH (сырой JSON) |
+| `GET /api/v1/kb/databases`, `POST /api/v1/kb/query`, `POST /api/v1/kb/documents`, `GET /api/v1/kb/tasks/{id}` | база знаний |
+| `POST /api/v1/candidates/save` | резюме → структурированный профиль → база `candidates` |
+| `POST /api/v1/arxiv/search` | структурный поиск статей (sync, 1–3 мин) |
+| `GET /api/v1/dashboards`, `GET /api/v1/health`, `GET /api/v1/docs`, `GET /api/v1/openapi.yaml` | сервисные |
 
 Примеры:
 ```bash
@@ -226,16 +266,20 @@ curl -s -X POST http://localhost:5000/api/proxy-mode -H 'Content-Type: applicati
 | `HH_ACCESS_TOKEN` | опционально | готовый токен (fallback) |
 | `SUMMARIZE_MODEL` | опционально | модель для summarize_papers |
 | `BRIDGE_*` | опционально | таймауты/порт/лог/файл режима бриджа |
+| `MAX_CONCURRENT_AGENT_JOBS` | опционально (2) | ёмкость одновременных агентских джоб API |
+| `JOB_TIMEOUT` | опционально (900) | watchdog раннера, сек |
+| `JOB_TTL_DAYS` | опционально (7) | срок хранения завершённых джоб |
+| `API_CORS_ORIGINS` | опционально (выкл) | CORS для /api/v1: `*` или список origin'ов |
 
-Рантайм-состояние в `config/` (bind-mount, в .gitignore): `hh_token.json` (секрет!), `hh_oauth_state.json`, `bridge_mode`.
+Рантайм-состояние в `config/` (bind-mount, в .gitignore): `hh_token.json` (секрет!), `api_keys.json` (только хэши), `hh_oauth_state.json`, `bridge_mode`. Джобы — в `jobs/` (bind-mount, в .gitignore).
 
 ## 10. Состояние и конкурентность — ГЛАВНОЕ ограничение
 
-- `arxiv_tools._session` — **модульный dict, не потокобезопасен**.
-- Поэтому: `worker_class="sync"` (1 запрос на воркер единовременно), `preload_app=False` (каждый воркер — свой импорт и свой `_session`), `workers=2`, `timeout=600` (агентный запрос может идти минуты).
-- `/chat` крутит async-генератор через **свежий event loop на запрос, без потоков**.
-- Межпроцессная гонка есть только у реестра дашбордов — закрыта `fcntl.flock`.
-- **Нельзя** добавлять потоки/async-воркеры/preload, не вынеся сессию из модульного скоупа. История чата живёт на клиенте и реплеится в промпт — сервер stateless между запросами (кроме файлов/токенов/реестра).
+- `arxiv_tools._session` — **модульный dict, не потокобезопасен**. Изоляция — по процессам.
+- Процессная модель: 2 sync-воркера gunicorn (быстрые HTTP-запросы + дебаг-чат) + **по одному процессу-раннеру на API-джобу** (агентские запуски не занимают воркеры) + процесс бриджа. `preload_app=False`, `timeout=600`.
+- `/chat` и раннер крутят async-генератор через **свежий event loop на процесс/запрос, без потоков**.
+- Межпроцессные гонки закрыты `fcntl.flock`: реестр дашбордов, статусы джоб (per-job), хранилище API-ключей, **обновление HH-токена** (HH ротирует refresh_token при использовании — двойной refresh из воркера и раннера убил бы токен).
+- **Нельзя** добавлять потоки/async-воркеры/preload, не вынеся сессию из модульного скоупа. История чата живёт на клиенте и реплеится в промпт — сервер stateless между запросами (кроме файлов/токенов/реестров/джоб).
 
 ## 11. Деплой
 

@@ -1,0 +1,639 @@
+openapi: 3.0.3
+
+info:
+  title: Arxivist Backend API
+  version: 1.0.0
+  description: |
+    Бэкенд-модуль HeadHunter-агента (HeadHunter + интернет + базы знаний) с доступом по API-ключу.
+
+    ## Аутентификация
+    Все эндпоинты (кроме `/docs`, `/openapi.yaml`, `/health`) требуют API-ключ в заголовке
+    `X-API-Key` (или `Authorization: Bearer <key>`). Ключи выпускаются оператором:
+    `python scripts/apikeys.py create --label "<имя клиента>"`. Ключ показывается один раз;
+    в хранилище лежит только его SHA-256. revoke действует немедленно, без рестарта.
+
+    ## Два семейства эндпоинтов
+    1. **Агентские задачи** (`/agent/jobs`) — полный LLM-агент со всеми интеграциями
+       (HeadHunter, базы знаний, arXiv, веб-поиск, дашборды). Выполняются минуты, поэтому
+       асинхронно: `POST` возвращает `202 {job_id}`, дальше поллинг `GET /agent/jobs/{id}`
+       (рекомендуемый интервал 2–5 с). Результат — markdown-ответ агента.
+    2. **Типизированные эндпоинты** (`/hh/*`, `/kb/*`, `/candidates/save`, `/arxiv/search`) —
+       детерминированные вызовы без LLM, отвечают синхронно за секунды
+       (исключение — `/arxiv/search` и `/kb/query`, до 1–3 минут).
+
+    ## Коды ошибок
+    Все не-2xx ответы имеют форму `{"error": {"code", "message", ...}}`:
+    | HTTP | code | смысл |
+    |---|---|---|
+    | 400 | `invalid_request` | неверные параметры запроса |
+    | 401 | `invalid_api_key` | ключ отсутствует/неверен/отозван |
+    | 403 | `hh_user_authorization_required` | нужен разовый вход в аккаунт HeadHunter (`authorize_url` в ответе) |
+    | 404 | `job_not_found` / `file_not_found` | нет такого объекта |
+    | 429 | `too_many_jobs` | занята вся ёмкость агентских задач (см. `Retry-After`) |
+    | 502 | `hh_error` / `hh_forbidden` / `kb_error` | ошибка внешнего сервиса |
+
+    ## Доступ к HeadHunter
+    Вакансии/компании работают сразу (application-токен выпускается автоматически).
+    Резюме/кандидаты требуют разового входа работодателя: получите `authorize_url`
+    из ответа 403 (или из `GET /hh/auth/status`), откройте его в браузере, войдите —
+    токен сохранится и будет обновляться автоматически.
+
+servers:
+  - url: .
+    description: Текущий деплой (URL берётся от места, где открыт этот файл)
+  - url: http://localhost:5000/api/v1
+    description: Локальный запуск (docker compose)
+
+security:
+  - ApiKeyAuth: []
+  - BearerAuth: []
+
+tags:
+  - name: agent
+    description: Асинхронные агентские задачи (полный LLM-флоу со всеми интеграциями)
+  - name: headhunter
+    description: Типизированный доступ к HeadHunter (сырой JSON api.hh.ru)
+  - name: knowledge-base
+    description: База знаний (ArangoDB-граф) — вопросы и загрузка документов
+  - name: candidates
+    description: Сохранение кандидатов (резюме → структурированный документ → база)
+  - name: arxiv
+    description: Структурный поиск научных статей
+  - name: files
+    description: Загрузка документов и скачивание полученных PDF
+  - name: meta
+    description: Служебные эндпоинты
+
+paths:
+  /health:
+    get:
+      tags: [meta]
+      summary: Проверка живости (без ключа)
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              example: { status: ok, time: 1784200000 }
+
+  /agent/jobs:
+    post:
+      tags: [agent]
+      summary: Создать агентскую задачу
+      description: |
+        Запускает полный агентский флоу — тот же, что в чате: подбор кандидатов по
+        текстовым критериям или по приложенному документу вакансии (`attached_file_ids`
+        из `POST /files`), обогащение базы знаний, генерация дашбордов, исследования.
+        Ответ приходит через поллинг `GET /agent/jobs/{job_id}`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentJobRequest" }
+            examples:
+              candidates:
+                summary: Подбор кандидатов по критериям
+                value:
+                  message: "Найди Python-разработчиков в Москве с опытом LLM, покажи топ-10 с ссылками на резюме"
+              vacancy_doc:
+                summary: Подбор по документу вакансии
+                value:
+                  message: "Подбери кандидатов под прикреплённое описание вакансии"
+                  attached_file_ids: ["0cd042478f654210a1f8d83491f8a651"]
+              followup:
+                summary: Продолжение диалога (история передаётся клиентом)
+                value:
+                  message: "Сохрани кандидатов 1 и 3"
+                  session_id: "my-session-42"
+                  history:
+                    - { role: "user", content: "Найди Python-разработчиков в Москве" }
+                    - { role: "assistant", content: "Нашлось 138 резюме... 1. ... 2. ..." }
+      responses:
+        "202":
+          description: Задача принята
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentJobAccepted" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429":
+          description: Ёмкость занята — повторите позже (заголовок Retry-After)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /agent/jobs/{job_id}:
+    get:
+      tags: [agent]
+      summary: Статус/результат задачи
+      parameters:
+        - { name: job_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: |
+            Текущее состояние. `state`: `queued` → `running` → `succeeded | failed | canceled`.
+            При `running` поле `progress` содержит человекочитаемые фразы прогресса.
+            При `succeeded` поле `result.reply` — итоговый markdown-ответ агента.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentJobStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [agent]
+      summary: Отменить задачу
+      parameters:
+        - { name: job_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Задача отменена (или уже была завершена)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentJobStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /files:
+    post:
+      tags: [files]
+      summary: Загрузить документ (PDF/DOCX/MD/TXT, ≤25 МБ)
+      description: Полученные `file_id` передаются в `attached_file_ids` агентской задачи.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        "200":
+          description: Метаданные сохранённых файлов
+          content:
+            application/json:
+              example:
+                files:
+                  - { file_id: "0cd0424…", name: "vacancy.md", parse_mode: plain, char_count: 328, size: 508 }
+                errors: []
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /files/{name}:
+    get:
+      tags: [files]
+      summary: Скачать полученный PDF (например, статью arXiv)
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string }, example: "2401.12345v1.pdf" }
+      responses:
+        "200":
+          description: PDF-файл
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /hh/vacancies:
+    get:
+      tags: [headhunter]
+      summary: Поиск вакансий
+      description: Возвращает сырой JSON api.hh.ru (`items`, `found`, `pages`, `page`).
+      parameters:
+        - { name: text, in: query, schema: { type: string }, example: "python developer" }
+        - { name: area, in: query, schema: { type: integer }, description: "1=Москва, 2=СПб, 113=Россия" }
+        - { name: employer_id, in: query, schema: { type: integer } }
+        - { name: experience, in: query, schema: { type: string, enum: [noExperience, between1And3, between3And6, moreThan6] } }
+        - { name: employment, in: query, schema: { type: string, enum: [full, part, project, volunteer, probation] } }
+        - { name: schedule, in: query, schema: { type: string, enum: [fullDay, shift, flexible, remote, flyInFlyOut] } }
+        - { name: salary, in: query, schema: { type: integer }, description: "минимальная зарплата, RUB" }
+        - { name: order_by, in: query, schema: { type: string, enum: [relevance, publication_time, salary_desc, salary_asc] } }
+        - { name: per_page, in: query, schema: { type: integer, maximum: 100, default: 20 } }
+        - { name: page, in: query, schema: { type: integer, default: 0 } }
+        - { name: date_from, in: query, schema: { type: string }, example: "2026-07-01T00:00:00+0300" }
+      responses:
+        "200": { $ref: "#/components/responses/HHRaw" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /hh/vacancies/{vacancy_id}:
+    get:
+      tags: [headhunter]
+      summary: Полная вакансия по ID
+      parameters:
+        - { name: vacancy_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/HHRaw" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /hh/employers:
+    get:
+      tags: [headhunter]
+      summary: Поиск компаний
+      parameters:
+        - { name: text, in: query, schema: { type: string }, example: "Яндекс" }
+        - { name: area, in: query, schema: { type: integer } }
+        - { name: type, in: query, schema: { type: string }, example: "company" }
+        - { name: per_page, in: query, schema: { type: integer, maximum: 100, default: 20 } }
+        - { name: page, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        "200": { $ref: "#/components/responses/HHRaw" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /hh/employers/{employer_id}:
+    get:
+      tags: [headhunter]
+      summary: Профиль компании (+ опционально вакансии)
+      parameters:
+        - { name: employer_id, in: path, required: true, schema: { type: string } }
+        - { name: include_vacancies, in: query, schema: { type: boolean, default: false },
+            description: "true — добавить в ответ до 20 открытых вакансий (поле vacancies)" }
+      responses:
+        "200": { $ref: "#/components/responses/HHRaw" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /hh/resumes:
+    get:
+      tags: [headhunter]
+      summary: Поиск резюме/кандидатов
+      description: |
+        Требует разовой авторизации работодателя HeadHunter (иначе 403 с `authorize_url`)
+        и платной подписки на базу резюме. Мягкие критерии (навыки, стек) передавайте
+        в `text`; фильтры используйте только когда они явно требуются — каждый фильтр
+        сужает выдачу. `relocation` требует `area`.
+      parameters:
+        - { name: text, in: query, schema: { type: string }, example: "python llm" }
+        - { name: area, in: query, schema: { type: integer } }
+        - { name: experience, in: query, schema: { type: string, enum: [noExperience, between1And3, between3And6, moreThan6] } }
+        - { name: salary_from, in: query, schema: { type: integer } }
+        - { name: salary_to, in: query, schema: { type: integer } }
+        - { name: currency, in: query, schema: { type: string, enum: [RUR, USD, EUR], default: RUR } }
+        - { name: schedule, in: query, schema: { type: string, enum: [fullDay, shift, flexible, remote, flyInFlyOut] } }
+        - { name: employment, in: query, schema: { type: string, enum: [full, part, project, volunteer, probation] } }
+        - { name: education_level, in: query, schema: { type: string, enum: [secondary, special_secondary, unfinished_higher, higher, bachelor, master, candidate, doctor] } }
+        - { name: age_from, in: query, schema: { type: integer } }
+        - { name: age_to, in: query, schema: { type: integer } }
+        - { name: relocation, in: query, schema: { type: string, enum: [living_or_relocation, living, living_but_relocation, relocation] } }
+        - { name: job_search_status, in: query, schema: { type: string, enum: [active_search, looking_for_offers] } }
+        - { name: period, in: query, schema: { type: integer }, description: "резюме, обновлённые за N дней" }
+        - { name: label, in: query, schema: { type: string, enum: [only_with_salary, only_with_photo, only_with_age] } }
+        - { name: order_by, in: query, schema: { type: string, enum: [relevance, salary_desc, salary_asc, publication_time] } }
+        - { name: per_page, in: query, schema: { type: integer, maximum: 100, default: 20 } }
+        - { name: page, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        "200": { $ref: "#/components/responses/HHRaw" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/HHUserAuthRequired" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /hh/resumes/{resume_id}:
+    get:
+      tags: [headhunter]
+      summary: Полное резюме по ID
+      parameters:
+        - { name: resume_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/HHRaw" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/HHUserAuthRequired" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /hh/reference/{ref_type}:
+    get:
+      tags: [headhunter]
+      summary: Справочники (регионы, роли, словари, навыки)
+      parameters:
+        - { name: ref_type, in: path, required: true,
+            schema: { type: string, enum: [areas, professional_roles, dictionaries, skills] } }
+        - { name: query, in: query, schema: { type: string },
+            description: "обязателен для ref_type=skills (автодополнение навыка)" }
+      responses:
+        "200": { $ref: "#/components/responses/HHRaw" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /hh/auth/status:
+    get:
+      tags: [headhunter]
+      summary: Статус авторизации HeadHunter
+      description: Показывает, есть ли пользовательский токен для поиска резюме.
+      responses:
+        "200":
+          description: Статус токена
+          content:
+            application/json:
+              example:
+                configured: true
+                grant: authorization_code
+                has_refresh_token: true
+                expires_in_seconds: 1200000
+                user_authorized: true
+                authorize_url: "/arxivist/hh/authorize"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /kb/databases:
+    get:
+      tags: [knowledge-base]
+      summary: Список баз знаний
+      responses:
+        "200":
+          description: Базы
+          content:
+            application/json:
+              example: { databases: [ { name: companies, status: ready }, { name: candidates, status: ready } ] }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /kb/query:
+    post:
+      tags: [knowledge-base]
+      summary: Вопрос к базе знаний (естественный язык)
+      description: Синхронный — внутренний поллинг задачи скрыт (до ~3 минут).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [database_name, question]
+              properties:
+                database_name: { type: string, example: candidates }
+                question: { type: string, example: "Покажи Python-разработчиков с опытом 4+ лет и ссылки на их резюме" }
+                user_context: { type: string }
+      responses:
+        "200":
+          description: Ответ
+          content:
+            application/json:
+              example: { answer: "Найдено 3 кандидата: …", database_name: candidates }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /kb/documents:
+    post:
+      tags: [knowledge-base]
+      summary: Загрузить JSON-документ в базу (создаёт базу при отсутствии)
+      description: |
+        База знаний принимает ТОЛЬКО структурированный JSON (не прозу).
+        `wait=true` (по умолчанию) — дождаться обработки; `wait=false` — вернуть
+        `202 {task_id}` и поллить `GET /kb/tasks/{task_id}`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [database_name, document, filename]
+              properties:
+                database_name: { type: string, example: companies }
+                document:
+                  type: object
+                  example: { company: "Acme", industry: "fintech", description: "…", sources: ["https://…"] }
+                filename: { type: string, example: acme.json }
+                wait: { type: boolean, default: true }
+      responses:
+        "200":
+          description: Обработано (wait=true)
+          content:
+            application/json:
+              example: { status: ingested, database_name: companies, filename: acme.json, task_id: "abc123" }
+        "202":
+          description: Принято (wait=false) — поллинг по task_id
+          content:
+            application/json:
+              example: { task_id: "abc123", state: processing, poll: "/api/v1/kb/tasks/abc123" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /kb/tasks/{task_id}:
+    get:
+      tags: [knowledge-base]
+      summary: Статус фоновой задачи базы знаний
+      parameters:
+        - { name: task_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Состояние (SUCCESS / FAILURE / PROGRESS)
+          content:
+            application/json:
+              example: { task_id: "abc123", state: SUCCESS, progress: 100, result: { files_processed: 1 }, error: null }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /candidates/save:
+    post:
+      tags: [candidates]
+      summary: Сохранить кандидатов в базу знаний
+      description: |
+        Детерминированный конвейер: по каждому `resume_id` берётся полное резюме
+        из HeadHunter, строится структурированный профиль (роль, регион, опыт,
+        навыки, зарплата, образование, ссылка на резюме) и сохраняется в базу
+        `candidates` (или указанную). Резюме — персональные данные: передавайте
+        только явно выбранные пользователем ID (до 20 за запрос).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resume_ids]
+              properties:
+                resume_ids:
+                  type: array
+                  maxItems: 20
+                  items: { type: string }
+                  example: ["1ac1626c00086f4f57004f27dd363069543661"]
+                database_name: { type: string, default: candidates }
+      responses:
+        "200":
+          description: Итог по каждому резюме
+          content:
+            application/json:
+              example:
+                database_name: candidates
+                saved:
+                  - { resume_id: "1ac1626c…", resume_url: "https://hh.ru/resume/1ac1626c…", filename: "candidate-1ac1626c….json" }
+                failed: []
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/HHUserAuthRequired" }
+
+  /arxiv/search:
+    post:
+      tags: [arxiv]
+      summary: Поиск и саммаризация научных статей
+      description: |
+        Синхронный (обычно 1–3 минуты): поиск arXiv → скачивание PDF → структурированные
+        саммари. PDF затем доступны через `GET /files/{name}`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query: { type: string, example: "diffusion models for code generation" }
+                max_results: { type: integer, default: 10, maximum: 50 }
+                authors: { type: string, example: "LeCun" }
+      responses:
+        "200":
+          description: Саммари + файлы
+          content:
+            application/json:
+              example:
+                result: "### 1. 2401.12345v1.pdf\n**Title:** …\n**Summary:** …"
+                files: [ { name: "2401.12345v1.pdf", size_kb: 1841.2 } ]
+                search_query: "all:diffusion AND all:models"
+                elapsed_seconds: 94.1
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /dashboards:
+    get:
+      tags: [meta]
+      summary: Список сгенерированных дашбордов
+      description: |
+        HTML каждого дашборда доступен без ключа по секретному URL `/d/{uuid}`
+        (относительно корня приложения, не /api/v1) — ссылку возвращает агент.
+      responses:
+        "200":
+          description: Дашборды (новые первыми)
+          content:
+            application/json:
+              example:
+                dashboards:
+                  - { uuid: "e3b0c44298fc1c149afbf4c8996fb924", title: "Обзор рынка Python", created_at: 1784200000, session_id: "api-…" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: "Ключ вида axv_<id>_<secret>, выпущенный scripts/apikeys.py"
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: "Тот же ключ в Authorization: Bearer <key>"
+
+  responses:
+    BadRequest:
+      description: Неверный запрос
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: invalid_request, message: "'message' is required." } }
+    Unauthorized:
+      description: API-ключ отсутствует, неверен или отозван
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: invalid_api_key, message: "Provide a valid key in the X-API-Key header." } }
+    NotFound:
+      description: Объект не найден
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    HHUserAuthRequired:
+      description: Нужен разовый вход в аккаунт работодателя HeadHunter
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: hh_user_authorization_required
+              message: "Resume access needs a one-time HeadHunter employer sign-in."
+              authorize_url: "/arxivist/hh/authorize"
+    UpstreamError:
+      description: Внешний сервис (HeadHunter / база знаний) вернул ошибку
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    HHRaw:
+      description: Сырой JSON-ответ api.hh.ru (структура — по документации HeadHunter)
+      content:
+        application/json:
+          schema: { type: object, additionalProperties: true }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+          additionalProperties: true
+
+    AgentJobRequest:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+          description: Запрос к агенту на естественном языке (ru/en)
+        history:
+          type: array
+          description: История диалога (хранится на стороне клиента, реплеится целиком)
+          items:
+            type: object
+            properties:
+              role: { type: string, enum: [user, assistant] }
+              content: { type: string }
+        session_id:
+          type: string
+          description: |
+            Стабильный ID сессии клиента. Нужен для непрерывности работы с дашбордами
+            (редактирование «активного» дашборда). Если не передан — генерируется на задачу.
+        attached_file_ids:
+          type: array
+          items: { type: string }
+          description: file_id из POST /files (например, документ вакансии)
+
+    AgentJobAccepted:
+      type: object
+      properties:
+        job_id: { type: string }
+        state: { type: string, enum: [queued] }
+        session_id: { type: string }
+        poll: { type: string, example: "/api/v1/agent/jobs/<job_id>" }
+
+    AgentResult:
+      type: object
+      description: Итог работы агента
+      properties:
+        reply: { type: string, description: "Финальный ответ агента (markdown)" }
+        files:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              size_kb: { type: number }
+        search_query: { type: string, description: "Фактический arXiv-запрос (если был)" }
+        elapsed_seconds: { type: number }
+
+    AgentJobStatus:
+      type: object
+      properties:
+        job_id: { type: string }
+        state: { type: string, enum: [queued, running, succeeded, failed, canceled] }
+        created_at: { type: integer, nullable: true }
+        started_at: { type: integer, nullable: true }
+        finished_at: { type: integer, nullable: true }
+        progress:
+          type: array
+          items: { type: string }
+          description: Последние фразы прогресса (только при state=running)
+        result:
+          nullable: true
+          allOf: [ { $ref: "#/components/schemas/AgentResult" } ]
+        error: { type: string, nullable: true }

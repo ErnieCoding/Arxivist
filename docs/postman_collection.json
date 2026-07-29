@@ -1,0 +1,275 @@
+{
+  "info": {
+    "name": "Arxivist Backend API",
+    "description": "Бэкенд-модуль HeadHunter-агента (HeadHunter + интернет + базы знаний).\n\nПеред использованием задайте переменные коллекции:\n- `baseUrl` — например http://localhost:5000/api/v1 (или https://<host>/arxivist/api/v1)\n- `apiKey` — ключ, выпущенный `python scripts/apikeys.py create --label <имя>`\n\nАгентские задачи асинхронные: Create agent job → скопируйте job_id из ответа в переменную `jobId` → поллите Get agent job status каждые 2–5 секунд до state=succeeded.\n\nПолная спецификация: GET {{baseUrl}}/openapi.yaml, интерактивная документация: {{baseUrl}}/docs",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      { "key": "key", "value": "X-API-Key", "type": "string" },
+      { "key": "value", "value": "{{apiKey}}", "type": "string" },
+      { "key": "in", "value": "header", "type": "string" }
+    ]
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:5000/api/v1" },
+    { "key": "apiKey", "value": "axv_..." },
+    { "key": "jobId", "value": "" },
+    { "key": "taskId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Meta",
+      "item": [
+        {
+          "name": "Health (no key)",
+          "request": { "method": "GET", "url": "{{baseUrl}}/health", "auth": { "type": "noauth" } }
+        },
+        {
+          "name": "OpenAPI spec (no key)",
+          "request": { "method": "GET", "url": "{{baseUrl}}/openapi.yaml", "auth": { "type": "noauth" } }
+        },
+        {
+          "name": "List dashboards",
+          "request": { "method": "GET", "url": "{{baseUrl}}/dashboards" }
+        }
+      ]
+    },
+    {
+      "name": "Agent jobs",
+      "item": [
+        {
+          "name": "Create agent job — candidates by criteria",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 202) {",
+                  "    pm.collectionVariables.set('jobId', pm.response.json().job_id);",
+                  "    console.log('jobId saved:', pm.response.json().job_id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/agent/jobs",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Найди Python-разработчиков в Москве с опытом LLM, покажи топ-10 со ссылками на резюме\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Create agent job — candidates from vacancy document",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/agent/jobs",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Подбери кандидатов под прикреплённое описание вакансии\",\n  \"attached_file_ids\": [\"<file_id из POST /files>\"]\n}"
+            }
+          }
+        },
+        {
+          "name": "Get agent job status (poll until succeeded)",
+          "request": { "method": "GET", "url": "{{baseUrl}}/agent/jobs/{{jobId}}" }
+        },
+        {
+          "name": "Cancel agent job",
+          "request": { "method": "DELETE", "url": "{{baseUrl}}/agent/jobs/{{jobId}}" }
+        }
+      ]
+    },
+    {
+      "name": "HeadHunter",
+      "item": [
+        {
+          "name": "Search vacancies",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/hh/vacancies?text=python developer&area=1&per_page=5",
+              "host": ["{{baseUrl}}"],
+              "path": ["hh", "vacancies"],
+              "query": [
+                { "key": "text", "value": "python developer" },
+                { "key": "area", "value": "1" },
+                { "key": "per_page", "value": "5" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get vacancy by id",
+          "request": { "method": "GET", "url": "{{baseUrl}}/hh/vacancies/12345678" }
+        },
+        {
+          "name": "Search employers",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/hh/employers?text=Яндекс&per_page=5",
+              "host": ["{{baseUrl}}"],
+              "path": ["hh", "employers"],
+              "query": [
+                { "key": "text", "value": "Яндекс" },
+                { "key": "per_page", "value": "5" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get employer + vacancies",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/hh/employers/1740?include_vacancies=true",
+              "host": ["{{baseUrl}}"],
+              "path": ["hh", "employers", "1740"],
+              "query": [{ "key": "include_vacancies", "value": "true" }]
+            }
+          }
+        },
+        {
+          "name": "Search resumes (needs HH sign-in)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/hh/resumes?text=python llm&area=1&job_search_status=active_search&per_page=10",
+              "host": ["{{baseUrl}}"],
+              "path": ["hh", "resumes"],
+              "query": [
+                { "key": "text", "value": "python llm" },
+                { "key": "area", "value": "1" },
+                { "key": "job_search_status", "value": "active_search" },
+                { "key": "per_page", "value": "10" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get resume by id",
+          "request": { "method": "GET", "url": "{{baseUrl}}/hh/resumes/<resume_id>" }
+        },
+        {
+          "name": "Reference — areas",
+          "request": { "method": "GET", "url": "{{baseUrl}}/hh/reference/areas" }
+        },
+        {
+          "name": "Reference — skills autocomplete",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/hh/reference/skills?query=python",
+              "host": ["{{baseUrl}}"],
+              "path": ["hh", "reference", "skills"],
+              "query": [{ "key": "query", "value": "python" }]
+            }
+          }
+        },
+        {
+          "name": "HH auth status",
+          "request": { "method": "GET", "url": "{{baseUrl}}/hh/auth/status" }
+        }
+      ]
+    },
+    {
+      "name": "Knowledge base",
+      "item": [
+        {
+          "name": "List databases",
+          "request": { "method": "GET", "url": "{{baseUrl}}/kb/databases" }
+        },
+        {
+          "name": "Query knowledge base",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/kb/query",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"database_name\": \"candidates\",\n  \"question\": \"Покажи Python-разработчиков с опытом 4+ лет и ссылки на их резюме\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Add document (wait)",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/kb/documents",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"database_name\": \"companies\",\n  \"filename\": \"acme.json\",\n  \"document\": {\n    \"company\": \"Acme\",\n    \"industry\": \"fintech\",\n    \"description\": \"Платёжная платформа\",\n    \"sources\": [\"https://acme.example\"]\n  },\n  \"wait\": true\n}"
+            }
+          }
+        },
+        {
+          "name": "KB task status",
+          "request": { "method": "GET", "url": "{{baseUrl}}/kb/tasks/{{taskId}}" }
+        }
+      ]
+    },
+    {
+      "name": "Candidates",
+      "item": [
+        {
+          "name": "Save candidates to knowledge base",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/candidates/save",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"resume_ids\": [\"<resume_id_1>\", \"<resume_id_2>\"],\n  \"database_name\": \"candidates\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "arXiv",
+      "item": [
+        {
+          "name": "Search + summarize papers (sync, 1-3 min)",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/arxiv/search",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"LLM agents for recruiting\",\n  \"max_results\": 5\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Files",
+      "item": [
+        {
+          "name": "Upload document (vacancy etc.)",
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/files",
+            "body": {
+              "mode": "formdata",
+              "formdata": [{ "key": "file", "type": "file", "src": "" }]
+            }
+          }
+        },
+        {
+          "name": "Download fetched PDF",
+          "request": { "method": "GET", "url": "{{baseUrl}}/files/<name>.pdf" }
+        }
+      ]
+    }
+  ]
+}

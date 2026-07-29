@@ -17,7 +17,7 @@ COPY . .
 
 # Ensure the persistent directories exist in the image so Docker can seed
 # named volumes from them on first run.
-RUN mkdir -p downloads .claude/skills uploads dashboards
+RUN mkdir -p downloads .claude/skills uploads dashboards jobs
 
 # Make entrypoint executable (COPY preserves bits but be explicit for cross-host clones).
 RUN chmod +x /app/entrypoint.sh

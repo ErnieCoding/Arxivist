@@ -13,6 +13,8 @@ HH OAuth grant types:
   - refresh_token      : refresh an expired user token.
 """
 
+import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -27,6 +29,10 @@ log = logging.getLogger(__name__)
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_DIR = os.path.dirname(_THIS_DIR)
 TOKEN_FILE = os.path.join(_PROJECT_DIR, "config", "hh_token.json")
+# Token refresh must be serialized across processes: HH rotates refresh_token
+# on use, so two concurrent _refresh() calls (2 gunicorn workers + any number
+# of API job runners) could persist a dead token. flock, not in-memory locks.
+TOKEN_LOCK_FILE = os.path.join(_PROJECT_DIR, "config", ".hh_token.lock")
 # CSRF state for the OAuth flow. File-based (not in-memory) because the
 # /hh/authorize and /hh/callback requests may hit different gunicorn workers.
 STATE_FILE = os.path.join(_PROJECT_DIR, "config", "hh_oauth_state.json")
@@ -91,6 +97,18 @@ def _read() -> dict:
             return json.load(f)
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         return {}
+
+
+@contextlib.contextmanager
+def _token_locked():
+    """Exclusive cross-process lock for token refresh/mint critical sections."""
+    os.makedirs(os.path.dirname(TOKEN_LOCK_FILE), exist_ok=True)
+    with open(TOKEN_LOCK_FILE, "a+") as lf:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
 
 
 def new_state() -> str:
@@ -204,25 +222,33 @@ def load_access_token() -> str:
     tok = _read()
     access = tok.get("access_token", "")
     expires_at = tok.get("expires_at")
-    refresh_token = tok.get("refresh_token")
 
     if access:
-        # Still valid (60s safety margin)?
+        # Still valid (60s safety margin)? — the hot path, no locking.
         if not expires_at or time.time() < float(expires_at) - 60:
             return access
-        # Expired — try refresh.
-        if refresh_token:
-            log.info("HH token expired; refreshing…")
-            r = _refresh(refresh_token)
-            if r["ok"]:
-                return r["data"].get("access_token", "")
-            log.warning("HH token refresh failed: %s", r.get("error"))
-        # If it's an app token with no refresh, mint a new one.
-        if tok.get("grant") == "client_credentials":
-            r = get_app_token()
-            if r["ok"]:
-                return r["data"].get("access_token", "")
-        return access  # last resort: return possibly-expired token
+        # Expired — refresh/mint under the cross-process lock. Another worker
+        # or job runner may have already refreshed while we waited, so re-read
+        # first: refresh tokens are single-use on HH's side.
+        with _token_locked():
+            tok = _read()
+            access = tok.get("access_token", "")
+            expires_at = tok.get("expires_at")
+            if access and (not expires_at or time.time() < float(expires_at) - 60):
+                return access
+            refresh_token = tok.get("refresh_token")
+            if refresh_token:
+                log.info("HH token expired; refreshing…")
+                r = _refresh(refresh_token)
+                if r["ok"]:
+                    return r["data"].get("access_token", "")
+                log.warning("HH token refresh failed: %s", r.get("error"))
+            # If it's an app token with no refresh, mint a new one.
+            if tok.get("grant") == "client_credentials":
+                r = get_app_token()
+                if r["ok"]:
+                    return r["data"].get("access_token", "")
+            return access  # last resort: return possibly-expired token
 
     # No stored token. Prefer an explicit env token; otherwise, if app
     # credentials are configured, transparently mint a client_credentials
@@ -231,11 +257,15 @@ def load_access_token() -> str:
     if env_token:
         return env_token
     if HH_CLIENT_ID and HH_CLIENT_SECRET:
-        log.info("No HH token stored; minting client_credentials app token")
-        r = get_app_token()
-        if r["ok"]:
-            return r["data"].get("access_token", "")
-        log.warning("HH app-token request failed: %s", r.get("error"))
+        with _token_locked():
+            tok = _read()  # another process may have minted while we waited
+            if tok.get("access_token"):
+                return tok["access_token"]
+            log.info("No HH token stored; minting client_credentials app token")
+            r = get_app_token()
+            if r["ok"]:
+                return r["data"].get("access_token", "")
+            log.warning("HH app-token request failed: %s", r.get("error"))
     return ""
 
 

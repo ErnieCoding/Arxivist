@@ -7,6 +7,7 @@ CLAUDE.md
 downloads/
 uploads/
 dashboards/
+jobs/
 
-# Runtime state + secrets (OAuth tokens, bridge mode). Never commit.
+# Runtime state + secrets (OAuth tokens, API keys, bridge mode). Never commit.
 config/

@@ -30,6 +30,12 @@ Powered by the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk
 - **One-time OAuth with auto-continue** — when resume search needs a sign-in, the agent posts a login link; after the user authorizes on hh.ru the callback tab closes itself and **the chat resumes the search automatically** (no manual "I'm back" message).
 - **Save candidates to the knowledge base** — the user picks candidates from the list ("save 1, 3 and 5"); each is stored in the `candidates` database as one document: structured profile + resume link. Nothing is saved without an explicit pick (resumes are personal data).
 
+### Backend API module (`/api/v1`)
+- **API-key access** — every endpoint requires a generated key (`X-API-Key` or `Authorization: Bearer`). Keys are minted/revoked with `scripts/apikeys.py` (SHA-256 at rest, revocation takes effect instantly, no restart).
+- **Agent jobs (async)** — `POST /api/v1/agent/jobs` runs the full agent flow (candidates from criteria or an attached vacancy doc, KB enrichment, dashboards) in a dedicated process: `202 {job_id}` → poll `GET /api/v1/agent/jobs/{id}` for progress phrases and the final markdown reply. Capacity-limited (429 + Retry-After when busy), cancellable via DELETE.
+- **Typed endpoints (sync)** — deterministic JSON without the LLM: HH vacancies/employers/resumes/reference (raw api.hh.ru passthrough), knowledge-base query/ingest, `POST /candidates/save` (resume → structured profile → `candidates` DB), arXiv search, file upload/download.
+- **Documentation** — OpenAPI 3.0 spec at [docs/openapi.yaml](docs/openapi.yaml), interactive Swagger UI at `GET /api/v1/docs`, importable Postman collection at [docs/postman_collection.json](docs/postman_collection.json).
+
 ### UX & infrastructure
 - **Live status streaming** — `/chat` streams SSE status phrases ("Ищу резюме…", "Собираю дашборд…") in the user's language while the agent works; the final answer contains results only, never internal mechanics.
 - **Sanitized rendering** — agent markdown goes through DOMPurify; external data (vacancy titles, resume fields) cannot inject HTML.
@@ -42,24 +48,35 @@ Powered by the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk
 
 ```
 Arxivist/
-├── app.py                  # Flask app: routes, /chat SSE loop, agent options, HH OAuth
+├── app.py                  # Flask app: UI routes, /chat SSE, HH OAuth, blueprint registration
+├── api_v1.py               # /api/v1 blueprint: key auth, agent jobs, typed HH/KB/candidates
+├── agent_pipeline.py       # THE agent pipeline (prompt/options/loop/reply) — shared by
+│                           #   /chat, the job runner, and /api/v1/arxiv/search
+├── jobs_store.py           # file-based agent-job store (202+poll; flock; TTL sweep)
+├── job_runner.py           # per-job runner process (spawned by POST /agent/jobs)
 ├── arxiv_tools.py          # MCP server `arxiv` + per-request session state (_session)
 ├── tools/
 │   ├── hh_tools.py         # MCP server `hh` — vacancies, employers, resumes (typed filters)
-│   ├── hh_auth.py          # HH OAuth2: app/user tokens, refresh, CSRF state
+│   ├── hh_auth.py          # HH OAuth2: app/user tokens, flock-guarded refresh, CSRF state
 │   ├── kb_tools.py         # MCP server `kb` — knowledge-graph query/ingest (JSON-only)
 │   ├── dashboard_tools.py  # MCP server `dashboard` — publish HTML, extract text
-│   └── call_api.py         # MCP server `api` — generic HTTP tool (no API specifics, by design)
+│   ├── call_api.py         # MCP server `api` — generic HTTP tool (no API specifics, by design)
+│   └── api_keys.py         # hashed API-key store (sha256 at rest, flock, instant revoke)
+├── scripts/apikeys.py      # key management CLI: create / list / revoke
 ├── bridge/bridge.py        # Anthropic-API bridge: direct ↔ upstream-proxy modes, /mode switch
-├── dashboards_store.py     # dashboard registry (flock-protected, 2 workers)
+├── dashboards_store.py     # dashboard registry (flock-protected)
 ├── uploads_store.py        # upload validation + text extraction + meta.json
 ├── text_extract.py         # DOCX (table-aware) / MD / TXT extraction; PDFs go to Claude natively
-├── templates/index.html    # single-file frontend: SSE reader, OAuth auto-continue, mode toggle
+├── templates/index.html    # single-file debug frontend: SSE reader, OAuth auto-continue
 ├── .claude/skills/         # agent skills (orchestration + self-extension), seeded into a volume
-├── docs/DEVELOPER.md       # developer guide (modules, flows, protocols, extension)
+├── docs/
+│   ├── DEVELOPER.md        # developer guide (modules, flows, protocols, extension)
+│   ├── openapi.yaml        # OpenAPI 3.0 spec for /api/v1 (served at /api/v1/openapi.yaml)
+│   └── postman_collection.json  # importable Postman collection
 ├── design-system.md        # dashboard design system the agent must follow
 ├── Dockerfile / docker-compose.yml / entrypoint.sh / gunicorn.conf.py
-└── config/                 # runtime state (gitignored): HH tokens, OAuth state, bridge mode
+├── jobs/                   # agent-job state (gitignored, bind-mounted)
+└── config/                 # runtime state (gitignored): HH tokens, API keys, bridge mode
 ```
 
 Note: `arxiv_tools.py` lives at the root (not in `tools/`) because it owns the module-level session state imported by `app.py`; the name also avoids a package/module collision with `tools/`.
@@ -127,6 +144,29 @@ Note: `arxiv_tools.py` lives at the root (not in `tools/`) because it owns the m
 | Resume / candidate search | one-time user sign-in via the link the agent posts (token auto-refreshes, ~14-day cycle) + a paid CV-database subscription on the HH employer account |
 
 The OAuth flow is CSRF-protected and fully automated end-to-end: link in chat → sign in on hh.ru → callback tab closes itself → the chat continues the search on its own.
+
+---
+
+## Backend API quickstart
+
+```bash
+# 1. Mint an API key (shown once)
+docker exec arxivist python scripts/apikeys.py create --label "recruiting-platform"
+
+# 2. Typed call — search resumes (seconds)
+curl -H "X-API-Key: axv_..." \
+  "http://localhost:5000/api/v1/hh/resumes?text=python+llm&area=1&per_page=10"
+
+# 3. Agent job — candidates from natural language (minutes, async)
+curl -X POST -H "X-API-Key: axv_..." -H "Content-Type: application/json" \
+  -d '{"message":"Найди Python-разработчиков в Москве, покажи топ-10 с резюме"}' \
+  http://localhost:5000/api/v1/agent/jobs
+# → 202 {"job_id": "...", "poll": "/api/v1/agent/jobs/..."}
+curl -H "X-API-Key: axv_..." http://localhost:5000/api/v1/agent/jobs/<job_id>
+# → {"state":"running","progress":["Ищу резюме…"]} → {"state":"succeeded","result":{"reply":"..."}}
+```
+
+Interactive docs: `http://localhost:5000/api/v1/docs` (Swagger UI). Import [docs/postman_collection.json](docs/postman_collection.json) into Postman and set `baseUrl` + `apiKey` variables.
 
 ---
 
